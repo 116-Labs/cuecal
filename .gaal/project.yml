@@ -1,0 +1,46 @@
+# Gaal project profile. Edit freely: `gaal onboard` keeps your values on re-runs.
+# Schema: https://github.com/116-Labs/gaal/blob/main/schemas/project.schema.json
+schema_version: 1
+repo: 116-Labs/cuecal
+default_branch: main
+visibility: private
+tracker:
+  kind: github
+gates:
+  - name: lint
+    command: uv run ruff check .
+    required: false
+    pending: true
+  - name: test
+    command: uv run pytest
+    required: false
+    pending: true
+preflight: []
+commits:
+  single_commit: true
+  attribution: none
+  convention: conventional
+branches:
+  prefix: gaal/
+merge:
+  queue: false
+  method: squash
+  message_source: commits
+review:
+  required_approvals: 1
+  threads_block_merge: false
+  reviewers: []
+  start_signal: reaction
+limits:
+  implement_attempts: 3
+  revise_rounds: 3
+  review_rounds: 2
+comms:
+  github_comments: true
+  maintainer_channels: []
+harnesses:
+  - claude-code
+  - codex
+  - antigravity
+okfmem:
+  enabled: false
