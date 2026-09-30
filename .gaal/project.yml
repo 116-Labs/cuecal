@@ -9,12 +9,10 @@ tracker:
 gates:
   - name: lint
     command: uv run ruff check .
-    required: false
-    pending: true
+    required: true
   - name: test
     command: uv run pytest
-    required: false
-    pending: true
+    required: true
 preflight: []
 commits:
   single_commit: true
