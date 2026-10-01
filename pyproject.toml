@@ -5,6 +5,9 @@ description = "Local-first agent that turns meeting invites in chat and email in
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "icalendar>=6",
+    "python-dateutil>=2.9",
+    "tzdata>=2024.1",
     "keyring>=25",
     "platformdirs>=4",
 ]
