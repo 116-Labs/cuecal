@@ -20,7 +20,7 @@ class Message:
 @dataclass
 class MeetingCandidate:
     title: str
-    start: datetime
+    start: datetime | None = None
     end: datetime | None = None
     tz: str | None = None
     join_url: str | None = None
@@ -30,3 +30,4 @@ class MeetingCandidate:
     source_ref: str | None = None
     confidence: float = 0.0
     tier: str = "regex"
+    method: str | None = None
