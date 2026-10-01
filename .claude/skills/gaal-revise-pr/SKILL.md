@@ -1,239 +1,263 @@
 ---
 name: gaal-revise-pr
-description: Revises an open pull request in 116-Labs/cuecal after review. It addresses every unresolved review thread with a code fix or a reasoned reply, runs the profile gates, pushes once per round, then replies to and resolves threads by rule. Use when a dispatch hands you a repo and PR number and asks for the `revise-pr` step, including imported feedback from another PR, a comment URL, or free-text notes. Do not use to open a PR, implement an issue, review a PR, or merge; those are other steps. Do not use when no PR can be determined; end as `needs-clarification` instead of guessing.
+description: Revises an open pull request in 116-Labs/cuecal after review. It addresses every unresolved review thread and every actionable request in a review body with a code fix or a reasoned reply, runs the profile gates (`uv run ruff check .`, `uv run pytest`), pushes once per round, replies to and resolves threads by rule, keeps the PR description true to the new head, and writes the run result to `$GAAL_RUN_DIR/result.json`. Use when a dispatch hands you a repo and PR number and asks for the `revise-pr` step, including imported feedback from another PR, a comment URL, or free-text notes. Do not use to open a PR, implement an issue, review a PR, or merge; those are other steps. Do not use when no PR can be determined; end as `needs-clarification` instead of guessing.
 ---
-<!-- gaal-stamp blueprint=revise-pr@1.2.0 shared=1.1.0 profile=0ed21dd3bece7944 generated=2026-09-30 content=ac7ccea01a6e5f15 -->
+<!-- gaal-stamp blueprint=revise-pr@1.4.0 shared=1.3.0 profile=7d4c49f36df8465f generated=2026-10-01 content=6424cf5f1093424b -->
 
 # gaal-revise-pr
 
-Close the review loop on an open PR in `116-Labs/cuecal`. Every unresolved thread gets a code change or a reasoned reply. The branch is pushed once per round with gates run and passing. Threads end in a state that matches what was done. Then review is requested again.
+Close the review loop on an open PR in `116-Labs/cuecal`. Every unresolved thread and every actionable request in a review body gets a code change or a reasoned reply. The branch is pushed once per round with green gates. Threads end in a state that matches what was done, and the PR description describes the head that was pushed.
 
-Inputs: repo and PR number from dispatch. Optional imported feedback: threads from another PR, a single comment URL, or free-text notes. `GAAL_RUN_ID` and `GAAL_RUN_DIR` come from the environment.
+## Run context
 
-Project facts (from the project profile):
-- Tracker: GitHub. Default branch: `main`. Branch prefix: `gaal/`.
-- Commit convention: conventional. Attribution: `none`. Single commit per PR.
-- Merge: squash, no merge queue, message taken from the commits (`message_source: commits`).
-- Review: 1 approval required. Open threads do not block merge (`threads_block_merge: false`). No reviewers are listed.
-- Limit: `limits.revise_rounds` = 3.
-- Preflight: none.
-- Gates, both `required: false` and `pending: true`:
-  - `lint`: `uv run ruff check .`
-  - `test`: `uv run pytest`
+- `<run-dir>` stands for the literal run directory path given in the run context (the value of `GAAL_RUN_DIR`). Write the real path into commands and files. Never write an environment variable reference inside a command.
+- The run id is the value of `GAAL_RUN_ID` from the run context. Copy that literal value into `result.json` as `run_id`. Never write an environment variable reference inside a command.
+- Inputs from dispatch: the PR number, and optionally imported feedback (threads from another PR, a single comment URL, or free-text notes). The dispatch may also name the issue.
+- Run one command per call. Never chain commands with `&&`, `;` or `|`.
+- Scratch files go in `<run-dir>/scratch` (create it with `mkdir -p <run-dir>/scratch`). Write files with the file tools, never through shell redirection.
+- Profile facts used below: repo `116-Labs/cuecal`, default branch `main`, tracker GitHub, branch prefix `gaal/`, conventional commits, `commits.attribution: none`, `commits.single_commit: true`, merge method `squash` with `merge.message_source: commits`, no merge queue, no auto-merge, `review.required_approvals: 1`, `review.threads_block_merge: false`, `review.reviewers: []`, `limits.revise_rounds: 3`. The profile names no `install` command and `preflight` is empty: install nothing and run the gates in this checkout.
 
 ## Steps
 
-Record `started_at` (UTC, RFC 3339) before anything else. Keep a manifest of every path this run writes, a list of gate runs (name, exact command, exit code, duration in ms), and a round counter starting at 0.
+### 0. Start
 
-### 1. Confirm the PR is open
+Read the start time with `date -u +%Y-%m-%dT%H:%M:%SZ` and keep it for `started_at`. Keep a manifest of every path this run writes and an item list (source, decision, sha or issue). When you must stop, go to step 15 with the matching exit state.
 
-Read the PR state through the GitHub API. Distinguish "the API said the PR is closed or merged" from "the call failed" (`fail-closed-reads`). An error, auth expiry or rate limit stops the run. Do not treat any of them as "no PR".
+### 1. Identify and confirm the PR
 
-- No PR number can be determined: end as `needs-clarification`. Never guess.
-- PR is closed or merged: end as `failed`.
-- The PR head branch lives on a fork, or the API call failed: see exit states.
+If no PR number can be determined from the dispatch, end as `needs-clarification` with a question asking for it. Never guess.
 
-Never change the base branch (`base-untouched`). All code changes land on this PR's branch only (`target-branch-only`).
+Run `gh pr view <pr> --repo 116-Labs/cuecal --json state,headRefName,headRefOid,baseRefName,isCrossRepository,reviewDecision,closingIssuesReferences,body`. A failed call stops the run (`fail-closed-reads`): an error, auth expiry or rate limit is never read as "no PR", "no threads" or "no checks". See the exit status of every `gh` and `git` call and handle a failure (`status-preserved`).
 
-### 2. Check out the PR head
+If `state` is not `OPEN`, end as `failed` with a reason naming this step. Record the head branch, head sha, base branch, and whether the branch is on a fork (`isCrossRepository`).
 
-Fetch the PR head branch from the remote and check out exactly the fetched commit. Note the fetched head sha, which is the lease sha for later pushes. If the lockfile (`uv.lock`) differs from the last install, run `uv sync`. Run the preflight commands; the profile lists none.
+### 2. Check out the PR head from the remote
 
-If the working tree has uncommitted changes this run did not make, stop and end as `needs-human` (`commit-foreign-edits`).
+Run `git status --porcelain`. Changes you did not make belong to someone else: never stage, commit or discard them (`commit-foreign-edits`, `explicit-staging`). If switching branches would overwrite them, end as `needs-human`.
+
+Run `git fetch origin <head-branch>`, then `git switch <head-branch>`. Compare `git rev-parse HEAD` with `git rev-parse origin/<head-branch>`. If the local branch holds commits that are not on the remote, end as `needs-human` instead of guessing; otherwise run `git reset --hard origin/<head-branch>` so you work on the head as fetched. Never work on `main` (`base-untouched`, `target-branch-only`).
+
+Install nothing: the profile has no `install` command, so the gates run here in the checkout.
 
 ### 3. List every unresolved review thread
 
-Use the GitHub GraphQL API (`reviewThreads` on the pull request), which exposes `isResolved`, `isOutdated` and thread ids. Page to the end using `pageInfo.hasNextPage` and `endCursor`. If a page fails or pagination cannot finish, stop the run (`complete-listings`, `fail-closed-reads`). Truncated data is never trusted.
+Use GraphQL, which exposes resolution state and thread ids. Write the literal PR number into the query:
 
-Record every thread id, with its comments and source (this PR or an import), before any history rewrite. Rewriting history marks threads outdated, and the ids are what you reply through later.
+`gh api graphql -F query='query { repository(owner: "116-Labs", name: "cuecal") { pullRequest(number: <pr>) { reviewThreads(first: 100) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated comments(first: 100) { pageInfo { hasNextPage } nodes { databaseId author { login } body path line url } } } } } } }'`
 
-For imported feedback:
-- Another PR's threads: list them the same way, paginated, and tag them as imports.
-- A comment URL: check its shape first. An `issuecomment-` URL points at an issue-level comment, which has no thread and no thread id. Treat it as an item to answer with a PR comment. A `discussion_r` URL is a review comment inside a thread.
+While `hasNextPage` is true, repeat with `reviewThreads(first: 100, after: "<endCursor>")` using the literal cursor (`complete-listings`). If a thread's `comments` has another page, end as `needs-human`: truncated data is never trusted.
+
+For each thread with `isResolved: false`, record the thread `id`, the `databaseId` of its first comment (the reply anchor), path, line and text. Record every thread id now, before any history rewrite, because a collapse marks threads outdated. Tag each item with its source: `this-pr`.
+
+### 4. Read the review bodies
+
+Run `gh api repos/116-Labs/cuecal/pulls/<pr>/reviews --paginate`. Read the body of the latest review from each reviewer, plus any earlier review body whose requests were never answered. A review body has no thread, so each actionable request in one (a change asked for, a finding listed only in the body) becomes an item tagged `review-body`. Skip pure verdicts, praise, and requests already answered by a later commit or comment. Each actionable request is owed an answer (`body-requests-answered`).
+
+### 5. Gather and re-verify imported feedback
+
+If the dispatch carries imports, tag each item `import` and re-verify it against this branch before deciding anything: it reproduces, partly applies, or does not apply.
+
+- Threads from another PR: list that PR's unresolved threads the same way as step 3 with its number, and keep their thread ids and first-comment ids.
+- A comment URL: check its shape first. A `#discussion_r<id>` fragment is a review comment: read it with `gh api repos/116-Labs/cuecal/pulls/comments/<id>`. A `#issuecomment-<id>` fragment is an issue-level comment with no thread: read it with `gh api repos/116-Labs/cuecal/issues/comments/<id>`, and answer it with a PR comment, not a thread reply.
 - Free-text notes: treat each distinct request as an item.
 
-If there are no unresolved threads and no imports, nothing needs changing. Go to step 12 and end as `done` with the unchanged head.
+Open the code and try to reproduce each finding. Never apply an imported finding that does not reproduce on this branch (`apply-unreproduced-import`); it gets a reply giving the reason (`every-thread-answered`). Fix only the part of a partly applying finding that reproduces.
 
-### 4. Re-verify imported items
+### 6. Decide each item
 
-For each imported item, check whether it reproduces, partly applies, or does not apply on this branch. Read the code and, where useful, run the relevant command. Never apply a finding that does not reproduce here (`apply-unreproduced-import`). An item that does not apply still gets a reply with the reason (`every-thread-answered`).
+For every item from steps 3 to 5 choose one:
 
-### 5. Decide each item
+- **fix**: change the code on this PR's branch.
+- **answer**: a question or explanation needs only a reply.
+- **defer**: a follow-up issue carries it, with agreement recorded on the thread. A deferral with no issue number is a pushback in disguise.
+- **push back**: you disagree; give reasons.
 
-Assign exactly one decision to each item:
-- **fix**: change the code.
-- **answer**: the item is a question or needs an explanation.
-- **defer**: the work belongs in a follow-up issue and the thread will show agreement. File the follow-up issue on GitHub first and get its number. Leave it unassigned and outside any milestone. A deferral with no issue number is a pushback in disguise (`resolve-unagreed-deferral`).
-- **push back**: you disagree, with reasons.
+A `review-body` item is decided the same way. A deferral there has no thread to carry agreement, so it is not resolved, and its follow-up issue is named in the reply.
 
-If a reviewer's request is so ambiguous that any fix would be a guess, do not guess. End as `needs-clarification` with `questions` quoting the thread. Still write the result file.
+If a reviewer's request is so ambiguous that any fix would be a guess, end as `needs-clarification` with `questions` that quote the thread.
 
-### 6. Make all fixes
+### 7. Make the fixes
 
-Make every fix in the working tree before running any gate or pushing. Add each written path to the manifest. Keep changes to what threads ask for. Fixes for imported items land on this PR's branch only (`target-branch-only`).
+Make every fix in the working tree on the PR branch (`target-branch-only`). A fix for an imported item lands only on this branch, and the reply names where. Add each path you write to the manifest. Make no edit that no item asks for.
 
-### 7. Run the gates
+### 8. Run every gate
 
-Increment the round counter. Run `uv run ruff check .` (`lint`) and `uv run pytest` (`test`) on the tree that will be pushed. Both are `pending`, and a pending gate runnable on this tree must exit 0 (`gates-green-before-push`).
+Run each gate in this checkout, one command per call, exactly as written. Time each: run `date -u +%s` as its own command just before the gate and again just after; `duration_ms` is the difference times 1000. Record `name`, `command`, `exit_code` and `duration_ms` per run.
 
-- Skip a gate only while its tool or manifest does not exist yet (for example no `pyproject.toml`, or `uv` is not installed). Say so in the PR comment and final message. A gate that did not run is absent from the result, never recorded as passed (`truthful-report`).
-- Capture each command's exit status directly. Never let a pipe, filter or `|| true` hide it (`status-preserved`).
-- Record every run in the gates list, including failed ones.
-- On failure, fix the cause, add changed paths to the manifest, and re-run every gate. Each fix-and-re-run cycle counts as a round.
-- If the round counter reaches 3 (`limits.revise_rounds`) and gates are still red, stop without pushing and end as `needs-human` (`bounded-rounds`).
-- If a failing gate also fails on the untouched base, it is pre-existing. Do not push red to work around it (`push-red`). End as `failed` and name the gate as pre-existing in `reason`.
+1. `uv run ruff check .` (gate `lint`, required)
+2. `uv run pytest` (gate `test`, required)
 
-### 7a. Guard against piecemeal work
+Run both even if the first fails. A gate that did not run is absent from the result, never passed (`truthful-report`). A gate may be skipped only while its tool or manifest does not exist yet, and the report says so; otherwise it must exit 0.
 
-Do not push between fixes or after each comment (`piecemeal-push`). One round means one push after all fixes and green gates (`one-push-per-round`).
+On failure, fix and re-run all gates. Each such cycle is one attempt; `attempts` counts the cycles used. When `limits.revise_rounds` (3) attempts have run without green gates, end as `needs-human` naming the failing gate (`bounded-rounds`). Never push a tree with a failing required gate (`push-red`, `gates-green-before-push`). A failure that was already red on the base is reported as pre-existing.
 
-### 8. Commit and push once
+If no item needed a code change, no gate run is required and `gates` may be empty.
 
-Skip this step if nothing changed.
+### 9. Commit once, push once
 
-1. Stage only paths in the manifest, by explicit path: `git add -- <path> [<path> ...]`. Never stage wholesale, and never use `git commit -a` (`explicit-staging`). Afterwards `git status --porcelain` must show no other change this run is responsible for.
-2. Commit the fixes as one fixup commit with a conventional message, for example `fix(<scope>): address review feedback`. The commit and later PR text follow `commits.attribution: none`. Add no `Co-Authored-By` line, no "generated by" line and no AI mention of any kind (`attribution-policy`).
-3. Push to the PR branch once. A plain `git push` of a fast-forward is fine. Check its exit status. A failed push is `failed`, or `needs-human` when a conflict or permission problem blocks it. Record the reason. Never use `--no-verify`.
+If there are fixes, stage only manifest paths, each by explicit path with `git add <path>` (`explicit-staging`). Confirm with `git diff --cached --name-only` that exactly the manifest paths are staged and with `git status --porcelain` that nothing else this run wrote is left over.
 
-Never commit or push to `main` (`base-untouched`).
+Write the commit message to `<run-dir>/scratch/commit-msg.txt` with the file tool: a conventional subject (for example `fix(<scope>): address review feedback`) and a short body. No attribution line and no AI trailer (`attribution-policy`, `commits.attribution: none`). Run `git commit -F <run-dir>/scratch/commit-msg.txt` with the hooks enabled as the one fixup commit. If a hook rejects it, fix what it reports and commit again; never skip, redirect or disable it (`bypass-hook`).
 
-### 9. Collapse to one commit, only on the final round
+Push exactly once with `git push origin HEAD:<head-branch>` (`one-push-per-round`, `piecemeal-push`). If a hook rejects the push, fix what it reports; if that is beyond this run, end as `failed` naming the hook. A conflict or permission problem that blocks the push ends as `needs-human`; any other failed push ends as `failed`. The push may dismiss existing approvals (`review.required_approvals` is 1); say so in the report.
 
-Run this only if all of these hold:
-- Every thread on this PR will be resolved after replies. Pushbacks and unagreed deferrals count as staying open. If any thread on this PR will remain open, do not collapse, and keep the fixup commit separate so the reviewer can diff only the delta (`collapse-with-open-threads`).
-- `merge.message_source` is `commits`. It is, so the regime gate passes.
+Run `git rev-parse HEAD` and record the fix sha. If nothing needed committing, nothing is pushed and the fix sha is the unchanged head.
 
-The fix push in step 8 must land first. The collapse reads the remote head, and collapsing before the push would ship without the fix.
+### 10. Settle the issue link and decide on the collapse
 
-Apply the shared single-commit collapse routine in **PR mode**. Declare the mode explicitly. Never infer it.
-1. Idempotence: if the branch is zero or one commit ahead of the merge base, do nothing and succeed.
-2. Read the head sha from the remote and check it equals the sha you pushed. Rewrite in a throwaway detached worktree, never in the local checkout.
-3. Soft gates: knowingly override the unresolved-threads gate, because the threads just fixed resolve after the push. Print the unresolved count. Treat an unreadable approval setting as "an approval would be dismissed" and note the override in the report.
-4. Hard gates, never overridden: the branch is on a fork, or any commit on it was authored by someone else, or the remote head is not an ancestor of what will be pushed. If one fires, do not collapse, and end as `failed` naming the gate. The fix push already landed. Say so in `reason`.
-5. Divergent local checkouts: back up local-only commits to a permanent branch ref, verify the backup, then reset. Uncommitted edits of unknown origin stop the collapse for a human (`needs-human`).
-6. Content preservation: if the rewrite nets to an empty change, restore and stop. After committing, the tree hash must equal the pre-collapse tree hash, or abort before pushing.
-7. Write one commit message for the whole change: conventional, a subject that describes the change as landed, no process commits ("wip", "fix lint", "address review"), and no attribution (`commits.attribution: none`).
-8. Push with an explicit lease on the inspected sha: `git push --force-with-lease=<branch>:<sha> origin HEAD:<branch>`. Never use `--force`, `-f`, or a lease with no expected sha (`bare-force-push`). This push is the collapse routine's own and does not count as a second round push. On failure, restore the previous HEAD. Remove only the throwaway worktree, on every exit path. Never use an interactive rebase and never merge or push with admin privileges (`admin-bypass`).
-9. Report mode, regime, commit count before and after, gates that fired, tree hash, old and new sha, backup refs in full.
-10. After a collapse, hard-reset the local checkout to the remote head: `git fetch origin <branch>` then `git reset --hard origin/<branch>`. Never pull (`pull-after-collapse`). Any other stale checkout needs the same reset.
+The collapse runs only when every thread on this PR will be resolved after step 13 (no pushback, no unagreed deferral, no other open thread) and `merge.message_source` is `commits`. Otherwise keep the fixup commit separate so the reviewer can diff only the delta, and never collapse with a thread left open (`collapse-with-open-threads`).
 
-If the collapse refuses or fails, end as `failed` naming the step.
+Settle the issue link before collapsing, by the issue-link rule (`description-matches-head`):
 
-### 10. Reply to every thread
+- Find the PR's issue: the dispatch first, then `closingIssuesReferences`, then the PR body, then each commit message (`git log --format=%B origin/main..HEAD`), reading closing-keyword lines before `Refs #N` lines. Extract only the numbers.
+- A round that completes some deferred criteria updates the **Deferred** list. A round that completes the last of them turns `Refs #N` into `Closes #N` and drops the list. A **Deferred** list appears only under `Refs`, never next to `Closes`.
+- When no collapse runs, leave the link and the **Deferred** list unchanged and say so in the round's reply.
 
-Reply through each thread's reply relation using the thread id recorded in step 3 (the GraphQL `addPullRequestReviewThreadReply` mutation). It works on outdated threads. Every thread that was unresolved at the start gets a reply, including imports that did not apply (`every-thread-answered`). For an issue-level comment with no thread, post a PR comment.
+### 11. Collapse, when step 10 says so
 
-Each reply describes what was actually done (`reply-matches-action`):
-- **fix**: names the sha that contains the fix. After a collapse, that is the collapsed head sha. Say "fixed in `<sha>`" only when that sha contains the fix (`truthful-report`). For an imported item, also name the branch and PR where it landed.
-- **answer**: gives the explanation.
-- **defer**: names the follow-up issue number, which was filed first.
-- **push back**: gives the reasons.
-- **import that does not apply**: says why it does not reproduce here.
+This is the shared single-commit collapse routine in PR mode. Knowingly override its unresolved-threads soft gate: the threads just fixed resolve after the push. Print the unresolved-thread count in the report. The collapse must follow the fix push, because it reads the remote head; collapsing first would ship without the fix.
 
-Check the exit status of every API write (`status-preserved`).
+1. Regime: `merge.message_source` is `commits`, so it applies.
+2. Idempotence: `git rev-list --count origin/main..<fix-sha>`; zero or one means do nothing.
+3. Target (PR mode): run `git fetch origin <head-branch>` and `git rev-parse origin/<head-branch>`; it must equal the sha pushed in step 9, else stop. Run `git worktree add --detach <run-dir>/worktree <fix-sha>`, then `cd <run-dir>/worktree`.
+4. Hard gates, never overridden: the branch is on a fork (`isCrossRepository`); any commit on it has another author (`git log --format=%an origin/main..<fix-sha>` against the git user); the remote head is not an ancestor of what will be pushed. Refuse and end as `failed` naming this step.
+5. Record `git merge-base origin/main <fix-sha>` and the pre-collapse tree `git rev-parse <fix-sha>^{tree}`, then `git reset --soft <merge-base>`.
+6. Write the whole-change message to `<run-dir>/scratch/collapse-msg.txt`: a conventional subject, a body for the change as a whole, and the link settled in step 10 (`Closes #N`, or `Refs #N` on its own line plus the **Deferred** list). Drop process commits. No attribution. Run `git commit -F <run-dir>/scratch/collapse-msg.txt` with hooks enabled.
+7. Content preservation: `git rev-parse HEAD^{tree}` must equal the pre-collapse tree hash, and the rewrite must not be empty; otherwise abort before pushing.
+8. Push with an explicit lease on the inspected sha: `git push --force-with-lease=<head-branch>:<fix-sha> origin HEAD:<head-branch>` (`bare-force-push` forbids anything weaker). On failure the remote still holds the previous head.
+9. Run `git rev-parse HEAD` for the new sha. `cd` back to the checkout and run `git worktree remove --force <run-dir>/worktree` on every exit path.
+10. In this checkout run `git fetch origin <head-branch>` and `git reset --hard origin/<head-branch>`. Never pull after a collapse (`pull-after-collapse`). The report names any other stale checkout that needs the same hard reset.
 
-### 11. Resolve threads by rule
+If the collapse refuses, end as `failed` naming this step. The final head sha (after the collapse if one ran) is the sha every reply names and the result's `commit_sha`.
 
-Resolve a thread (the GraphQL `resolveReviewThread` mutation) only if it was fixed, is outdated, or was deferred with agreement recorded on the thread (`resolve-by-rule`).
+### 12. File deferrals, then reply
 
-- Leave pushbacks open for the reviewer (`resolve-pushback`).
-- Leave a deferral open if agreement is not recorded on the thread (`resolve-unagreed-deferral`). Because `threads_block_merge` is false, an open deferral does not block merge, but the rule still holds.
-- Resolving another PR's thread may fail on permissions. The reply is what matters. Note the failure and continue; it is not a blocker.
+File every follow-up issue first, with no milestone and no assignee so it lands in the backlog: write the body to a file in `<run-dir>/scratch` and run `gh issue create --repo 116-Labs/cuecal --title "<title>" --body-file <run-dir>/scratch/<file>`. Note the issue number.
 
-### 12. Request review again
+Reply to every thread through its reply relation, which works on outdated threads too: write the text to a file and run `gh api repos/116-Labs/cuecal/pulls/<pr>/comments/<first-comment-id>/replies -F body=@<run-dir>/scratch/<reply-file>` with the first-comment id from step 3 (`every-thread-answered`). For an imported thread from another PR, use that PR's number and comment id. If that reply fails on permissions, the reply was the point; note it and continue. An issue-level import comment is answered with a PR comment.
 
-The profile lists no reviewers and no re-request command, so do not invent one. Post one PR comment (`comms.github_comments: true`) with a per-item table: source, decision, and sha or issue. Say the PR is ready for another look. List open pushbacks. Also state any gates that were skipped and why. Use no attribution. If nothing changed, say so. State in the final message that no reviewer was re-requested because the profile names none.
+Each reply describes what was done (`reply-matches-action`):
 
-### 13. Write the run result
+- A fix reply names the final sha that contains the fix, only when that sha really contains it (`truthful-report`). For an imported item it also says where the fix landed (`target-branch-only`).
+- A deferral reply names the follow-up issue number.
+- A pushback reply gives reasons.
+- An imported item that did not reproduce gets the reason it does not apply.
 
-Do this on every exit path, including failures and early exits (`run-result-written`). If `GAAL_RUN_DIR` is set, write `$GAAL_RUN_DIR/result.json` atomically: write to a temp file in the same directory, then rename it over `result.json`.
+Answer every `review-body` item in one PR comment: write it to `<run-dir>/scratch/body-reply.md`, naming or quoting each request with its decision (sha, issue number, or reasons), and post it with `gh pr comment <pr> --repo 116-Labs/cuecal --body-file <run-dir>/scratch/body-reply.md` (`body-requests-answered`). When it applies, say there that the issue link and **Deferred** list were left unchanged because no collapse ran.
 
-Fields, and only these (additional properties are rejected):
+### 13. Resolve threads by rule
+
+Resolve a thread only if it was fixed, is outdated, or was deferred with agreement recorded on the thread (`resolve-by-rule`). Run `gh api graphql -F query='mutation { resolveReviewThread(input: {threadId: "<thread-id>"}) { thread { isResolved } } }'` with the id from step 3, one call per thread, and check the returned `isResolved`.
+
+- Leave open every thread where the revision disagreed with the reviewer (`resolve-pushback`).
+- Leave open every deferral the reviser decided alone (`resolve-unagreed-deferral`). Deferral and pushback have opposite outcomes when threads block merge: an agreed deferral resolves, a pushback does not.
+- Review-body items have nothing to resolve.
+- If resolving another PR's thread fails on permissions, that is not a blocker; the reply stands.
+
+Open pushbacks are normal; list them in the report.
+
+### 14. Update the PR description, then request review again
+
+Skip the edit when the round changed no code and no claim in the description became false. Otherwise, after the last push (counts and claims go stale across rounds, so check them then, not before), read the body with `gh pr view <pr> --repo 116-Labs/cuecal --json body` against the pushed tree and this round's outcome: the summary, the test plan, and any test count, gate result or behavioural claim the round changed. Edit only what is now false or missing. Keep the issue reference (changed only as step 10 settled) and any attribution section, and do not rewrite untouched prose. The link in the body must equal the one in the head commit message (`description-matches-head`). Write the new body to `<run-dir>/scratch/pr-body.md` and run `gh pr edit <pr> --repo 116-Labs/cuecal --body-file <run-dir>/scratch/pr-body.md`. This pushes nothing. Do it before re-requesting review.
+
+Request review again per `review`: the profile lists no reviewers and names no re-request mechanism, so there is no call to make; the replies and resolved threads are the signal, and the report says so. Do not merge, enable auto-merge or touch a queue.
+
+### 15. Write the run result
+
+Do this on every exit path, including failures and early stops (`run-result-written`, `truthful-report`). Read the finish time with `date -u +%Y-%m-%dT%H:%M:%SZ`. Write `<run-dir>/result.json.tmp` with the file tool, then run `mv <run-dir>/result.json.tmp <run-dir>/result.json`. Never leave the `.tmp` file behind.
+
+The file is a JSON object with exactly these fields:
+
 - `schema_version`: `1`
-- `run_id`: the value of `$GAAL_RUN_ID`
+- `run_id`: taken from `$GAAL_RUN_ID`, the literal value from the run context
 - `blueprint`: `"revise-pr"`
-- `blueprint_version`: `"1.2.0"`
+- `blueprint_version`: `"1.4.0"`
 - `repo`: `"116-Labs/cuecal"`
-- `issue`: the linked issue number, or `null`
+- `issue`: the PR's issue number, or `null`
 - `pr`: the PR number, or `null` if none could be determined
 - `status`: one of `done`, `needs-human`, `needs-clarification`, `failed`
-- `reason`: required unless `status` is `done`. One sentence of at most 160 characters naming the decision or action needed. Detail goes in the PR comment and final message.
-- `questions`: required and non-empty when `status` is `needs-clarification`, each quoting the thread
-- `attempts`: rounds used, an integer of at least 1
-- `gates`: only gates that actually ran, each with `name`, `command`, `exit_code`, `duration_ms`. It may be empty when nothing changed.
+- `reason`: required unless `status` is `done`; one sentence of at most 160 characters naming the decision or action needed. Detail belongs in the PR comment and the final message.
+- `questions`: required and non-empty when `status` is `needs-clarification`; each question quotes the thread
+- `attempts`: integer of at least 1, the gate cycles used
+- `gates`: the gate runs from step 8 with `name`, `command`, `exit_code`, `duration_ms`; empty when none ran
 - `branch`: the PR head branch, or `null`
-- `commit_sha`: the PR head after the run as a 40-character lowercase hex sha, or `null` if unknown. When nothing changed, it is the unchanged head.
-- `started_at`, `finished_at`: RFC 3339 timestamps with a timezone
+- `commit_sha`: the PR head after the run, 40 lowercase hex characters (the unchanged head when nothing was pushed), or `null`
+- `started_at` and `finished_at`: UTC timestamps such as `2026-01-01T00:00:00Z`
 
-Example, for a `done` run:
+Example for a finished run:
 
-```
+```json
 {
   "schema_version": 1,
-  "run_id": "<value of $GAAL_RUN_ID>",
+  "run_id": "<value of GAAL_RUN_ID from the run context>",
   "blueprint": "revise-pr",
-  "blueprint_version": "1.2.0",
+  "blueprint_version": "1.4.0",
   "repo": "116-Labs/cuecal",
-  "issue": null,
-  "pr": 42,
+  "issue": 12,
+  "pr": 34,
   "status": "done",
   "attempts": 1,
   "gates": [
-    {"name": "lint", "command": "uv run ruff check .", "exit_code": 0, "duration_ms": 850},
-    {"name": "test", "command": "uv run pytest", "exit_code": 0, "duration_ms": 4200}
+    {"name": "lint", "command": "uv run ruff check .", "exit_code": 0, "duration_ms": 1200},
+    {"name": "test", "command": "uv run pytest", "exit_code": 0, "duration_ms": 8400}
   ],
-  "branch": "gaal/<slug>",
-  "commit_sha": "<40 hex characters>",
-  "started_at": "2026-09-29T10:00:00Z",
-  "finished_at": "2026-09-29T10:06:00Z"
+  "branch": "gaal/12-example",
+  "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T00:05:00Z"
 }
 ```
 
-Add `reason` for any status other than `done`. Add `questions` for `needs-clarification`.
+For any status other than `done`, add `reason`; for `needs-clarification`, add `questions` too.
 
 ## Exit states
 
-- `done`: every thread is answered and the branch is pushed with gates run and passing. `commit_sha` is the PR head after the run. When nothing needed changing, it is the unchanged head, nothing was pushed, and `gates` may be empty. The report has one row per item (source, decision, sha or issue). Open pushbacks are normal and listed.
-- `needs-clarification`: no PR could be determined, or a reviewer's request is ambiguous enough that any fix would be a guess. `questions` quote the thread.
-- `needs-human`: the round limit (3) was reached with red gates, or a conflict or permission problem blocks the push, or uncommitted edits of unknown origin block a reset. `reason` names it.
-- `failed`: the PR is not open, the push failed, the collapse refused, or a gate is red on the base as well (reported as pre-existing). `reason` names the step. API errors, auth expiry and rate limits also end here or as `needs-human`. They never become "no PR", "no threads" or "no checks".
+- `done`: every thread and every actionable review-body request is answered, the description matches the head, and the branch is pushed with green gates. `commit_sha` is the PR head after the run; when nothing needed changing it is the unchanged head, nothing was pushed, and `gates` may be empty. The report has one row per item (source, decision, sha or issue). Open pushbacks are normal and listed.
+- `needs-clarification`: no PR could be determined, or a reviewer's request is so ambiguous that any fix would be a guess. `questions` quote the thread.
+- `needs-human`: the round limit (3) was reached with red gates, or a conflict, a permission problem, foreign uncommitted edits, local-only commits or truncated listings block the run. `reason` names it.
+- `failed`: the PR is not open, the push failed, or the collapse refused. `reason` names the step. Gates already red on the base are reported as pre-existing.
 
 ## Invariants
 
-Blueprint invariants:
-- `every-thread-answered`: every thread unresolved at the start has a reply at the end, including imports that did not apply.
-- `one-push-per-round`: one push per round, after all fixes.
-- `gates-green-before-push`: every runnable gate, including pending ones, exited 0 on the pushed tree. Skip one only while its tool or manifest does not exist, and say so.
-- `reply-matches-action`: each reply states what was done: a sha containing the fix, an issue number for a deferral, or reasons for a pushback.
-- `resolve-by-rule`: resolve only fixed, outdated, or agreed-deferral threads.
-- `target-branch-only`: code changes land only on this PR's branch.
-- `bounded-rounds`: gate-fix cycles stop at 3 rounds and end as `needs-human`.
+From `revise-pr`:
 
-Shared invariants:
+- `every-thread-answered`: every unresolved thread at the start has a reply at the end, imports that did not apply included.
+- `one-push-per-round`: the branch is pushed once per round, after all fixes.
+- `gates-green-before-push`: every required gate exited 0 on the pushed tree; a runnable pending gate too.
+- `reply-matches-action`: a sha that contains the fix, an issue number for a deferral, reasons for a pushback.
+- `resolve-by-rule`: resolve only fixed, outdated, or agreed-deferral threads.
+- `target-branch-only`: code changes land only on this PR's branch; a fix for an imported item names where it landed.
+- `bounded-rounds`: gate-fix cycles stop at `limits.revise_rounds` (3), ending as `needs-human`.
+- `body-requests-answered`: every actionable review-body request is acted on or answered in a PR comment.
+- `description-matches-head`: the description states nothing the pushed head contradicts, and its issue link equals the head commit's, edited before review is re-requested.
+
+Shared:
+
 - `explicit-staging`: stage only manifest paths, by explicit path.
 - `base-untouched`: never commit or push to `main`.
-- `fail-closed-reads`: an API error is never "nothing there".
-- `complete-listings`: paginate to the end or stop.
-- `truthful-report`: report only what happened. A gate that did not run is absent, not passed.
-- `status-preserved`: never lose a command's exit status to a pipe, filter or guard.
-- `attribution-policy`: commits and PR text follow `commits.attribution: none`. Add nothing and drop nothing.
-- `run-result-written`: write `$GAAL_RUN_DIR/result.json` on every exit path.
+- `fail-closed-reads`: an error, auth expiry or rate limit stops the run; it is never "nothing found".
+- `complete-listings`: paginate threads, reviews, comments and checks to the end or stop.
+- `truthful-report`: report only what happened; a gate that did not run is absent.
+- `status-preserved`: never lose a command's success or failure to a pipe or guard.
+- `attribution-policy`: follow `commits.attribution: none` exactly; add no attribution to commits or PR bodies.
+- `run-result-written`: write `result.json` atomically on every exit path.
 
 ## Forbidden actions
 
-Blueprint:
-- `push-red`: pushing a branch with a failing gate to clear comments.
+From `revise-pr`:
+
+- `push-red`: pushing with a failing required gate to clear comments.
 - `piecemeal-push`: pushing once per comment instead of once per round.
 - `resolve-pushback`: resolving a thread where the revision disagreed with the reviewer.
-- `resolve-unagreed-deferral`: resolving a deferral only the reviser decided on. A deferral with no issue number is a pushback in disguise.
+- `resolve-unagreed-deferral`: resolving a deferral only the reviser decided on; a deferral with no issue number is a pushback.
 - `apply-unreproduced-import`: applying an imported finding that does not reproduce on this branch.
 - `collapse-with-open-threads`: collapsing while any thread on this PR will remain open.
-- `pull-after-collapse`: pulling into a checkout after a collapse. Hard-reset it to the remote instead.
+- `pull-after-collapse`: pulling into a checkout after a collapse; hard-reset it to the remote.
 
 Shared:
+
 - `bare-force-push`: force-pushing without `--force-with-lease=<branch>:<sha>` on the inspected sha.
-- `admin-bypass`: merging, pushing or rewriting with admin privileges to get around branch protection or a verification hook.
+- `admin-bypass`: merging or pushing with admin privileges to get around protection, a queue or a hook.
+- `bypass-hook`: skipping or redirecting hooks or signing in any way; fix what the hook reports, or end as `failed` naming it.
 - `machine-specific-paths`: hard-coding a person's home directory, private scripts or services.
 - `commit-foreign-edits`: committing changes this run did not make.
-
-Also never use `--force`, `-f`, `--no-verify`, `--admin`, `git add -A`, `git add .` or `git commit -a`.
