@@ -1,7 +1,7 @@
 [project]
 name = "cuecal"
 version = "0.1.0"
-description = "Local-first agent that turns meeting invites in chat and email into calendar events."
+description = "Local-first agent that finds meeting invites in chat and email and puts them on your calendar."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
