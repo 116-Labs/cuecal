@@ -1,0 +1,23 @@
+name = "zoho-mail"
+transport = "sse"
+url = "https://mcp.zoho.com/sse"
+auth_provider = "zoho"
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+
+list_tool = "list_emails"
+
+[list_args]
+query = "meeting OR invite OR .ics"
+cursor = "{cursor}"
+limit = 50
+
+items_path = "data.emails"
+cursor_path = "data.next_cursor"
+
+[field_mapping]
+id = "message_id"
+sender = "from_address"
+ts = "received_time"
+text = "body_text"
+permalink = "web_url"

@@ -64,11 +64,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     cfg_path = paths.config_path()
     print(f"config path: {cfg_path}")
     try:
-        load_config(cfg_path)
+        cfg = load_config(cfg_path)
         print("config: ok")
     except ConfigError as exc:
         ok = False
         print(f"config: {exc}")
+        cfg = None
+        
+    if cfg:
+        for source_name in cfg.sources:
+            if source_name.startswith("mcp:") or source_name in ["zoho-mail", "zoho-cliq"]:
+                # Try to validate mapping
+                name = source_name.split(":", 1)[1] if ":" in source_name else source_name
+                try:
+                    from cuecal.sources.mcp import load_source
+                    src = load_source(name)
+                    try:
+                        src.validate()
+                        print(f"source {source_name}: ok")
+                    except Exception as exc:
+                        ok = False
+                        print(f"source {source_name}: validation failed ({exc})")
+                except Exception as exc:
+                    ok = False
+                    print(f"source {source_name}: mapping load failed ({exc})")
+                    
     print(f"db path: {paths.db_path()}")
     try:
         print(f"keyring backend: {secrets.backend_name()}")
