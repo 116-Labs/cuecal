@@ -1,0 +1,70 @@
+{
+  "ok": true,
+  "query": "zoom.us OR meet.google.com OR teams.microsoft.com OR teams.live.com OR webex.com",
+  "messages": {
+    "total": 3,
+    "pagination": {
+      "total_count": 3,
+      "page": 1,
+      "per_page": 20,
+      "page_count": 1,
+      "first": 1,
+      "last": 3
+    },
+    "paging": {
+      "count": 20,
+      "total": 3,
+      "page": 1,
+      "pages": 1
+    },
+    "matches": [
+      {
+        "type": "message",
+        "user": "U12345",
+        "username": "alice",
+        "text": "Hey <@U67890|bob>, let's sync on the roadmap: <https://zoom.us/j/98765432101?pwd=secret123|Join Zoom Meeting>\nPasscode: secret123\nMeeting ID: 987 6543 2101",
+        "ts": "1700000100.000100",
+        "channel": {
+          "id": "C012345",
+          "name": "general"
+        },
+        "permalink": "https://workspace.slack.com/archives/C012345/p1700000100000100",
+        "attachments": []
+      },
+      {
+        "type": "message",
+        "user": "U67890",
+        "username": "bob",
+        "text": "Weekly standup moved to Google Meet: <https://meet.google.com/abc-defg-hij>",
+        "ts": "1700000200.000200",
+        "channel": {
+          "id": "C012345",
+          "name": "general"
+        },
+        "permalink": "https://workspace.slack.com/archives/C012345/p1700000200000200",
+        "attachments": []
+      },
+      {
+        "type": "message",
+        "user": "U12345",
+        "username": "alice",
+        "text": "Check out the unfurl below for details",
+        "ts": "1700000300.000300",
+        "channel": {
+          "id": "C099999",
+          "name": "announcements"
+        },
+        "permalink": "https://workspace.slack.com/archives/C099999/p1700000300000300",
+        "attachments": [
+          {
+            "id": 1,
+            "title": "Microsoft Teams Meeting",
+            "title_link": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_abcdef%40thread.v2/0?context=context123",
+            "text": "Join the company all-hands\nMeeting ID: 234 567 890 123\nPasscode: allhands",
+            "fallback": "Teams meeting invitation"
+          }
+        ]
+      }
+    ]
+  }
+}

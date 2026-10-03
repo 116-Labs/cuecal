@@ -94,5 +94,5 @@ def test_stub_commands_exit_nonzero(capsys):
     assert cli.main(["run", "--once"]) == 2
     assert cli.main(["--dry-run", "pending"]) == 2
     assert cli.main(["service", "install"]) == 2
-    assert cli.main(["auth", "slack"]) == 2
+    assert cli.main(["auth", "google"]) == 2
     assert "not implemented" in capsys.readouterr().err

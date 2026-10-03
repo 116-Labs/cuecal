@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "messages": [
+    {
+      "type": "message",
+      "user": "U12345",
+      "text": "Fallback channel message with Webex link: <https://company.webex.com/meet/alice|Alice's Personal Room>\nMeeting number: 123 456 789\nPasscode: webexpass",
+      "ts": "1700000400.000400",
+      "attachments": []
+    },
+    {
+      "type": "message",
+      "user": "U67890",
+      "text": "Just saying hello without any meeting link",
+      "ts": "1700000050.000050",
+      "attachments": []
+    }
+  ],
+  "has_more": false,
+  "response_metadata": {
+    "next_cursor": ""
+  }
+}
