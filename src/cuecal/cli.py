@@ -7,7 +7,7 @@ import logging
 import sys
 from collections.abc import Sequence
 
-from . import __version__, db, log, paths, registry, secrets
+from . import __version__, db, lock, log, paths, registry, secrets, service
 from .config import ConfigError, load_config, write_default_config
 
 logger = logging.getLogger("cuecal.cli")
@@ -48,7 +48,24 @@ def cmd_auth(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     logger.info("run requested", extra={"once": args.once, "dry_run": args.dry_run})
-    return _not_implemented("run")
+    instance_lock = lock.SingleInstanceLock()
+    if not instance_lock.acquire():
+        logger.info("another cuecal instance is already running; exiting cleanly")
+        return 0
+    try:
+        conn = db.connect(paths.db_path())
+        run_id = db.record_run_start(conn)
+        try:
+            # Future pipeline runs here; currently records successful run
+            db.record_run_finish(conn, run_id, status="success")
+            conn.close()
+            return 0
+        except Exception as exc:
+            db.record_run_finish(conn, run_id, status="error", error=str(exc))
+            conn.close()
+            raise
+    finally:
+        instance_lock.release()
 
 
 def cmd_pending(args: argparse.Namespace) -> int:
@@ -56,6 +73,21 @@ def cmd_pending(args: argparse.Namespace) -> int:
 
 
 def cmd_service(args: argparse.Namespace) -> int:
+    if args.action == "install":
+        plist = service.install_service()
+        print(f"installed launchd service: {plist}")
+        return 0
+    if args.action == "uninstall":
+        removed = service.uninstall_service()
+        if removed:
+            print("uninstalled launchd service")
+        else:
+            print("service was not installed")
+        return 0
+    if args.action == "status":
+        st = service.get_service_status()
+        print(service.format_status(st))
+        return 0
     return _not_implemented(f"service {args.action}")
 
 
@@ -136,8 +168,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("pending", parents=[common], help="review low-confidence candidates")
     p.set_defaults(func=cmd_pending)
 
-    p = sub.add_parser("service", parents=[common], help="install or remove the background service")
-    p.add_argument("action", choices=["install", "uninstall"])
+    p = sub.add_parser("service", parents=[common], help="manage the background service")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
     p.set_defaults(func=cmd_service)
 
     p = sub.add_parser("doctor", parents=[common], help="report config, DB, keyring and plugins")
