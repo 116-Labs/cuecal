@@ -15,6 +15,9 @@ dependencies = [
 [project.scripts]
 cuecal = "cuecal.cli:main"
 
+[project.entry-points."cuecal.sources"]
+gmail = "cuecal.sources.gmail:GmailSource"
+
 [dependency-groups]
 dev = [
     "pytest>=8",
