@@ -6,9 +6,10 @@ from typing import Protocol, runtime_checkable
 
 from cuecal.models import Message
 from cuecal.sources.gmail import GmailSource
+from cuecal.sources.mcp import MCPSource
 from cuecal.sources.slack import SlackSource
 
-__all__ = ["GmailSource", "SlackSource", "Source"]
+__all__ = ["GmailSource", "MCPSource", "SlackSource", "Source"]
 
 
 @runtime_checkable

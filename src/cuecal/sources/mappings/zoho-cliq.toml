@@ -1,0 +1,23 @@
+name = "zoho-cliq"
+transport = "sse"
+url = "https://mcp.zoho.com/sse"
+auth_provider = "zoho"
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+
+list_tool = "list_messages"
+
+[list_args]
+query = "meeting OR invite OR zoom OR meet"
+cursor = "{cursor}"
+limit = 50
+
+items_path = "data.messages"
+cursor_path = "data.next_cursor"
+
+[field_mapping]
+id = "message_id"
+sender = "sender.email"
+ts = "created_time"
+text = "content"
+permalink = "message_url"
