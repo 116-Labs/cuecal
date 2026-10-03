@@ -9,6 +9,9 @@ SUBCOMMANDS = ["init", "auth", "run", "pending", "service", "doctor"]
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CUECAL_CONFIG", str(tmp_path / "config.toml"))
     monkeypatch.setenv("CUECAL_DB", str(tmp_path / "state.db"))
+    monkeypatch.setenv("CUECAL_LAUNCHD_PLIST", str(tmp_path / "com.cuecal.agent.plist"))
+    monkeypatch.setenv("CUECAL_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("CUECAL_LOCK_PATH", str(tmp_path / "cuecal.lock"))
     monkeypatch.setattr(registry, "_registry", {kind: {} for kind in registry.KINDS})
 
 
@@ -91,8 +94,58 @@ def test_init_creates_config_and_db(tmp_path):
 
 
 def test_stub_commands_exit_nonzero(capsys):
-    assert cli.main(["run", "--once"]) == 2
     assert cli.main(["--dry-run", "pending"]) == 2
-    assert cli.main(["service", "install"]) == 2
     assert cli.main(["auth", "google"]) == 2
     assert "not implemented" in capsys.readouterr().err
+
+
+def test_cli_service_lifecycle(tmp_path, capsys):
+    # Initial status: not installed
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "service: not installed (launchd)" in out
+    assert "last run: never" in out
+
+    # Install
+    assert cli.main(["service", "install"]) == 0
+    out = capsys.readouterr().out
+    assert "installed launchd service" in out
+    assert (tmp_path / "com.cuecal.agent.plist").exists()
+
+    # Status: installed
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "service: installed (launchd)" in out
+
+    # Uninstall
+    assert cli.main(["service", "uninstall"]) == 0
+    out = capsys.readouterr().out
+    assert "uninstalled launchd service" in out
+    assert not (tmp_path / "com.cuecal.agent.plist").exists()
+
+
+def test_cli_run_once(tmp_path, capsys):
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["run", "--once"]) == 0
+
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "last run:" in out
+    assert "(success)" in out
+
+
+def test_cli_run_lock_contention(tmp_path, capsys):
+    from cuecal.lock import SingleInstanceLock
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    # Hold the lock externally
+    external_lock = SingleInstanceLock(tmp_path / "cuecal.lock")
+    assert external_lock.acquire() is True
+
+    # Overlapping run invocation must exit cleanly with code 0
+    assert cli.main(["run", "--once"]) == 0
+
+    external_lock.release()
