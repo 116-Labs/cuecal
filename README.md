@@ -25,7 +25,7 @@ Secrets: OS keychain via keyring, never in the config file
 ```
 
 - **Sources.** Gmail and Slack have native, read-only adapters. Every other source goes through one generic MCP client driven by a per-server mapping file, so adding a source means writing a mapping, not code.
-- **Tier 0: decide.** A small local decision model ([Laya](https://github.com/116-Labs/cuecal/issues/21)) decides whether a message is a meeting invite at all, which drops most traffic for free. Regex then extracts the join URL, meeting ID and passcode; those never come from an LLM, and the meeting ID is the dedupe key.
+- **Tier 0: decide.** Today the link regex is the Tier 0 gate, and a small local decision model ([Laya](https://github.com/116-Labs/cuecal/issues/21)) is planned in [#21](https://github.com/116-Labs/cuecal/issues/21). Regex extracts the join URL, meeting ID and passcode; those never come from an LLM, and the meeting ID is the dedupe key.
 - **Tier 1: parse.** `.ics` / `text/calendar` attachments and known invite templates (Zoom, Google Calendar, Zoho) are parsed deterministically. A candidate is high-confidence only when its start time and timezone are both unambiguous.
 - **Tier 2: local LLM.** A small model on Ollama fills in only what parsing couldn't (time, title, attendees) as strict JSON.
 - **Tier 3: paid LLM.** Runs only when Tier 2 fails validation or reports low confidence, under a per-day cap.
