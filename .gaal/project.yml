@@ -4,6 +4,8 @@ schema_version: 1
 repo: 116-Labs/cuecal
 default_branch: main
 visibility: private
+identities:
+  push: ["116-labs-gaal-push[bot]"]
 tracker:
   kind: github
 gates:
@@ -25,6 +27,7 @@ merge:
   method: squash
   message_source: commits
 review:
+  identity: { reviewer: separate, login: "116-labs-gaal-review[bot]" }
   required_approvals: 1
   threads_block_merge: false
   reviewers: []
