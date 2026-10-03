@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "user": {
+    "id": "U12345",
+    "name": "alice_w",
+    "real_name": "Alice Williams",
+    "profile": {
+      "display_name": "Alice W",
+      "real_name": "Alice Williams"
+    }
+  }
+}

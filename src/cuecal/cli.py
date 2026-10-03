@@ -29,6 +29,20 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_auth(args: argparse.Namespace) -> int:
+    if args.provider == "slack":
+        token = getattr(args, "token", None)
+        if not token:
+            try:
+                token = input("Slack user token (xoxp-...): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nauth cancelled", file=sys.stderr)
+                return 1
+        if not token:
+            print("error: token cannot be empty", file=sys.stderr)
+            return 1
+        secrets.set_secret("slack", token)
+        print("stored slack token in keyring")
+        return 0
     return _not_implemented(f"auth {args.provider}")
 
 
@@ -92,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("auth", parents=[common], help="store credentials for a provider")
     p.add_argument("provider")
+    p.add_argument("--token", help="token to store directly instead of prompting")
     p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("run", parents=[common], help="poll sources and create events")
