@@ -38,7 +38,7 @@ def test_doctor_reports_paths_backend_and_plugins(tmp_path, capsys):
     assert f"db path: {tmp_path / 'state.db'}" in out
     assert "keyring backend:" in out
     assert "sinks: ics" in out
-    assert "sources: (none registered)" in out
+    assert "sources: gmail" in out
 
 
 def test_doctor_reports_broken_plugin(monkeypatch, capsys):

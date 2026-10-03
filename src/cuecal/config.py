@@ -29,13 +29,19 @@ pending = 0.5
 # Only keyring entry names belong here, never tokens. Store secrets with `cuecal auth <provider>`.
 """
 
-_TOP_KEYS = {"sources", "sink", "poll_interval_seconds", "llm", "thresholds", "secrets"}
+_TOP_KEYS = {"sources", "sink", "poll_interval_seconds", "llm", "thresholds", "secrets", "gmail"}
 _LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
 
 
 class ConfigError(ValueError):
     """Raised when the config file is missing, unparsable or invalid."""
+
+
+@dataclass
+class GmailConfig:
+    query: str = "zoom.us OR meet.google.com OR teams.microsoft.com OR filename:ics"
+    lookback_days: int = 7
 
 
 @dataclass
@@ -47,6 +53,7 @@ class Config:
     auto_create_threshold: float = 0.85
     pending_threshold: float = 0.5
     secrets: dict[str, str] = field(default_factory=dict)
+    gmail: GmailConfig = field(default_factory=GmailConfig)
 
 
 def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
@@ -112,6 +119,16 @@ def parse_config(data: dict[str, Any]) -> Config:
                 f"`cuecal auth {provider}` and reference the keyring entry name here"
             )
     cfg.secrets = dict(secrets)
+
+    gmail_data = _table(data, "gmail", {"query", "lookback_days"})
+    query = gmail_data.get("query", cfg.gmail.query)
+    if not isinstance(query, str):
+        raise ConfigError("gmail.query must be a string")
+    lookback = gmail_data.get("lookback_days", cfg.gmail.lookback_days)
+    if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback < 1:
+        raise ConfigError("gmail.lookback_days must be a positive integer")
+    cfg.gmail = GmailConfig(query=query, lookback_days=lookback)
+
     return cfg
 
 
