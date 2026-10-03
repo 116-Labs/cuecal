@@ -1,6 +1,6 @@
 import pytest
 
-from cuecal import cli, registry
+from cuecal import __version__, cli, registry
 
 SUBCOMMANDS = ["init", "auth", "run", "pending", "service", "doctor"]
 
@@ -19,6 +19,13 @@ def test_help_lists_subcommands(capsys):
     out = capsys.readouterr().out
     for name in SUBCOMMANDS:
         assert name in out
+
+
+def test_version_prints_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"cuecal {__version__}\n"
 
 
 def test_doctor_reports_paths_backend_and_plugins(tmp_path, capsys):
