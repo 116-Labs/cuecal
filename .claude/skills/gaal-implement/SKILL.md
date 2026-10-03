@@ -2,114 +2,255 @@
 name: gaal-implement
 description: Implements one qualified GitHub issue in 116-Labs/cuecal as a verified change on its own `gaal/` branch holding exactly one commit, then writes the run result to `$GAAL_RUN_DIR/result.json`. Use when a dispatch hands you a repo and issue number that already passed qualification and asks for the `implement` step, before any PR exists. Do not use to open a PR, revise a PR after review, review a PR, or merge; those are other steps. Do not use for issues that have not been qualified.
 ---
-<!-- gaal-stamp blueprint=implement@1.4.0 shared=1.3.0 profile=7d4c49f36df8465f generated=2026-10-01 content=32e8a434fa05a9f1 -->
+<!-- gaal-stamp blueprint=implement@1.7.0 shared=1.4.0 profile=7d4c49f36df8465f generated=2026-10-03 core=e7ca0d74f7c8e378 forbidden=e3a5c6b1ec65f2a7 content=5648b82cee1f17ee -->
 
 # gaal-implement
 
-Turn one qualified issue in `116-Labs/cuecal` into a branch off the base holding **exactly one commit** that meets the issue's acceptance criteria and passes every profile gate. `open-pr` takes it from there. This skill never pushes and never opens a PR.
+Take one qualified issue of `116-Labs/cuecal` and produce a branch off `main` holding **exactly one commit**. The commit satisfies the issue's acceptance criteria and passes every profile gate. `open-pr` takes it from there. This run never pushes, never opens a PR and never merges.
 
 ## Run context
 
-- `<run-dir>` in every command below stands for the literal run directory path given in the run context (the value of `GAAL_RUN_DIR`, the directory that holds `$GAAL_RUN_DIR/result.json`). Substitute the literal path. Never write `$GAAL_RUN_DIR` or `$GAAL_RUN_ID` inside a command.
-- `run_id` is the literal value of `GAAL_RUN_ID` from the run context.
-- Base ref: `main` (`default_branch`), or the parent branch when the dispatch says the work is stacked.
-- Tracker: GitHub. Branch prefix: `gaal/`. Commit convention: conventional. Attribution: none. Merge method: squash, message taken from the commits (`merge.message_source: commits`), no merge queue. Attempt limit: **3** (`limits.implement_attempts`).
-- Gates, in order, both required:
-  1. `lint`: `uv run ruff check .`
-  2. `test`: `uv run pytest`
-- Preflight: none. Install: the profile names no install command, so install nothing. Use the checkout's existing install and run the gates in the checkout itself. A throwaway worktree would have no install, so do not create one for this work.
-- Headless rules: one command per call, with no chains, pipes or redirection. Use literal paths inside this checkout. Put scratch files under `<run-dir>/scratch`. Write files with the file tools, not shell redirection. Run gate commands exactly as written above, with nothing added.
+- Inputs from dispatch: issue number `<N>`. Repository is `116-Labs/cuecal`, base branch is `main` (or a specified parent branch for stacked work), and tracker is GitHub (`tracker.kind: github`).
+- Base branch: `main`. Default branch: `main`. Branch prefix: `gaal/` (`branches.prefix: gaal/`).
+- Commit convention: conventional (`commits.convention: conventional`). Attribution policy: `none` (`commits.attribution: none`). Single commit per PR (`commits.single_commit: true`).
+- Merge configuration: squash (`method: squash`), no queue (`queue: false`), commit message source from commits (`message_source: commits`), auto-merge off (`auto: false`).
+- Review policy: 1 required approval, open threads do not block merge (`threads_block_merge: false`), `reviewers: []`, start signal reaction.
+- Attempt limit: `limits.implement_attempts` = 3 gate-fix attempts.
+- `<run-dir>` stands for the literal run directory path from the run context (the value of `GAAL_RUN_DIR`). The run id is the literal value of `GAAL_RUN_ID`. Write both out literally in every command and file path. Never expand environment variables such as `$GAAL_RUN_DIR` or `$GAAL_RUN_ID` in a command, never put `NAME=value` before a command, and never use `$(...)` or backticks.
+- Headless execution: the run cannot ask questions interactively mid-run (`ask-mid-run`). If an issue is ambiguous or blocked, end as `needs-clarification` or `needs-human`.
+- Allowed shell commands: `git`, `gh`, `mkdir`, `mv`, `cp`, `ls`, `cat`, `date`, `pwd` with any arguments, plus exactly `uv run ruff check .` and `uv run pytest`. Run one command per call, with no `&&`, `;` or `|` chains. Write files with the file-editing tool, never with shell redirection.
+- Preflight & Advisory: the profile defines no preflight commands and no advisory commands.
+- Dependencies: the profile defines no `install` command. Install nothing. Work and run the gates in this checkout where dependencies are already installed. A throwaway worktree would have no install, so do not run gates in a throwaway worktree.
+- Scratch files and throwaway worktrees live inside `<run-dir>/scratch` and `<run-dir>/worktree` (create `<run-dir>/scratch` with `mkdir -p <run-dir>/scratch`), never in `/tmp`.
 
 ## Steps
 
-1. **Start the clock.** Run `date -u +%Y-%m-%dT%H:%M:%SZ` and keep the output as `started_at`. Run `mkdir -p <run-dir>/scratch`. Keep a running list of gates run (name, command, exit code, duration) and an attempt counter. From here on, every exit path ends in step 13.
+### 1. Start the clock and initialize tracking
 
-2. **Resolve the repo and the issue.** Take the issue number from the dispatch. Run `git remote get-url origin` and confirm it points at `116-Labs/cuecal`. If the repo or issue cannot be resolved, stop without guessing: end as `needs-clarification` if the dispatch is ambiguous, or `failed` if the repo or tracker is unreachable.
+1. Run `date -u +%Y-%m-%dT%H:%M:%SZ` and keep the timestamp as `started_at`.
+2. Note the literal run id from the run context and the issue number `<N>`.
+3. Run `mkdir -p <run-dir>/scratch`.
+4. Initialize an empty gate ledger to record every gate that runs (name, command, exit code, duration in milliseconds).
+5. Initialize the attempt counter at 0.
+6. From this point forward, all exit paths terminate by atomically writing the run result at step 14 (`run-result-written`).
 
-3. **Read the full spec.** Fetch the body with `gh issue view <N> --repo 116-Labs/cuecal`. Fetch every comment with `gh api repos/116-Labs/cuecal/issues/<N>/comments --paginate` (`complete-listings`). A failed call, auth expiry or rate limit ends the run as `failed`; never treat a failed read as "no comments" (`fail-closed-reads`). Comments that clarify or narrow scope are part of the spec. When a comment says the body was rewritten, the current body wins. Extract the acceptance criteria as a numbered list.
+### 2. Resolve the repository and the issue
 
-4. **Check for drift.** Open every file, symbol and line the issue references and compare with the current code on the base. Record any drift. If the issue is ambiguous, or the code has drifted beyond what a plan can safely assume, end as `needs-clarification` with specific, answerable `questions`, each naming the file or criterion it concerns (`ask-mid-run`: never wait for input).
+1. Run `git remote get-url origin` and verify it points to `116-Labs/cuecal`.
+2. Run `gh issue view <N> --repo 116-Labs/cuecal --json number,title,body,state,labels`.
+3. If the repository or issue cannot be resolved, or if an API call fails due to network, auth expiration, or rate limits, stop and end as `failed` (`fail-closed-reads`, `status-preserved`). Never guess, and never treat an API error as an empty result.
 
-5. **Look for existing code to extend.** Search the repo for code that already owns the capability the issue adds, and extend it rather than building a parallel one. If building new is justified, note why in the plan. Pre-existing debt you notice goes in the report, not the diff (`unrelated-refactor`).
+### 3. Read the issue body and every comment
 
-6. **Write the plan before any source edit** (`plan-before-code`). With the file tool, save `<run-dir>/plan.md` listing the files to change, the tests to add, and, for each numbered acceptance criterion, how it will be shown to hold. Every criterion must map to part of the plan. Note any drift and any reuse decision. If a criterion cannot be mapped, end as `needs-clarification`. If the plan would break a public contract, schema or persisted format (CLI surface, config, SQLite state) and the issue does not explicitly ask for it, end as `needs-human` (`unapproved-breaking-change`). If it requires a deploy, publish or migration against a shared environment, leave that out and put the commands in the report for a human (`deploy`).
+1. Fetch all issue comments to the end: `gh api repos/116-Labs/cuecal/issues/<N>/comments --paginate` (`complete-listings`). If the call fails, stop and end as `failed` (`fail-closed-reads`).
+2. Comments that clarify or narrow scope are part of the specification. Give precedence to comments opening with `**Clarification**`, `**Clarification (rewrite)**`, or `**Clarification (scope narrow)**`.
+3. If a comment indicates that the body was rewritten, the current body takes precedence.
+4. List all acceptance criteria explicitly and number them for verification.
 
-7. **Check the checkout and look for resumable work.**
-   - Run `git status --porcelain`, `git branch --show-current` and `git branch --list "gaal/*"`.
-   - **Resume marker handed over in the prompt:** adopt it only if all three hold: the marker's branch is checked out, the base matches the marker's base, and the uncommitted paths are exactly the marker's `paths`. Those edits are this issue's work, not stray edits. Take the marker's plan as the starting plan (copy it to `<run-dir>/plan.md`), seed the manifest with the marker's paths, and go to step 10 with a fresh attempt count of 0. If a condition fails, ignore the marker and apply the rules below.
-   - **Existing branch for this issue with a clean tree:** resume it if its commits are sound and based on the base. Otherwise start fresh.
-   - **Dirty tree not matching an adopted marker:** the edits predate this run and ownership is unclear. Do not commit, revert, reformat or stash them (`absorb-stray-edits`, `commit-foreign-edits`). End as `needs-human`, with `reason` naming the dirty paths and, if a marker was handed over, which adoption condition failed (branch not checked out, base differs, or dirty paths differ from the marker's `paths`).
+### 4. Check checkout state and fetch the base
 
-8. **Create the branch off the base.** Run `git fetch origin main` (or the parent branch for stacked work), then `git checkout -b gaal/<N>-<short-slug> origin/main`, using the parent ref in place of `origin/main` for stacked work. Never commit or push to `main` (`base-untouched`). If work somehow started on the base, move it to a feature branch and reset the base to its remote. Install nothing. A stacked rebase conflict ends the run as `needs-human`.
+1. Run `git status --porcelain` and `git branch --show-current`. Ignore untracked files located under `<run-dir>`.
+2. Any pre-existing dirty edits outside `<run-dir>` belong to someone else (`absorb-stray-edits`, `commit-foreign-edits`): record the dirty paths; never commit, revert, or reformat them.
+3. Run `git fetch origin main`. If the fetch fails, end as `failed` (`fail-closed-reads`).
+4. If currently on `main` with unpushed commits ahead of `origin/main`, never commit on `main` (`base-untouched`). Move those commits off `main` only if they are unambiguously yours; otherwise end as `needs-human`.
 
-9. **Implement the plan.** Read each file before changing it. Keep edits minimal and within the plan. Keep the manifest at `<run-dir>/manifest.txt` with the file tool, one repo-relative path per line, updated every time you write a path. A path missing from the manifest slides into the next issue's commit, so record every file you create or edit, tests included.
+### 5. Check code references and inspect for reuse
 
-10. **Run the gates, counting attempts.** One attempt is one full pass through the gates, followed by fixes when anything failed.
-    - Increment the attempt counter.
-    - For each gate in order: run `date -u +%s`, then the gate command (`uv run ruff check .`, then `uv run pytest`) as its own call, then `date -u +%s` again. `duration_ms` is the difference times 1000. Record name, exact command, exit code and duration. Replace earlier records for that gate with the latest so the result describes the final tree (`truthful-report`). A gate that did not run is absent, never recorded as passed. Run every gate even if an earlier one failed, so all failures are seen (`status-preserved`).
-    - If every gate exits 0 on the final tree, go to step 11 (`gates-green`). Any edit after a green run means the gates run again.
-    - If a gate fails and the counter is below 3, fix the cause (update the manifest) and repeat.
-    - **At 3 attempts with a gate still failing** (`bounded-attempts`), stop and end as `needs-human` with the failing gate output summarized in the final message and a one-sentence `reason` naming the gate. If work is uncommitted, first write the resume marker with the file tool at `<run-dir>/resume.json`: `{"schema_version": 1, "run_id": "<run_id>", "issue": <N>, "branch": "<branch>", "base": "<base>", "paths": [<the manifest, exactly the dirty tree left behind>], "plan": "<run-dir>/plan.md"}` (`plan` is null if no plan was saved). Do not commit.
+1. Check every file, symbol, function, class, and line referenced in the issue against the current code. Record any drift.
+2. Search the codebase for existing modules or classes that already own the capability the issue adds, and extend them rather than introducing parallel implementations. If building a new module is justified, document the rationale in the plan.
+3. If the issue is ambiguous or the codebase has drifted beyond what can be safely assumed, do not guess or prompt interactively (`ask-mid-run`); end as `needs-clarification` with specific, answerable questions in `questions`, each naming the file or criterion concerned.
 
-11. **Stage and commit exactly the manifest.**
-    - Stage by explicit path: `git add <path> <path> ...` listing manifest paths only (`explicit-staging`). Never stage wholesale.
-    - Verify with `git diff --cached --name-only` that the staged set equals the manifest exactly, and with `git status --porcelain` that nothing else this run is responsible for is left (`manifest-matches-staged`). Fix any mismatch before committing.
-    - Write the commit message with the file tool to `<run-dir>/scratch/commit-msg.txt`. It describes the change as a whole, follows conventional commits (`type(scope): summary`), and carries **no attribution lines** (`commits.attribution: none`; nothing added, nothing dropped, `attribution-policy`). Link the issue by the issue-link rule (`issue-trailer`):
-      - every acceptance criterion met: a line `Closes #<N>`.
-      - some criteria left open: a line `Refs #<N>` on its own, never a closing keyword, plus a **Deferred** heading listing each open criterion worded as the issue words it. A closing keyword never appears next to a Deferred list.
-    - Commit with the hooks enabled: `git commit -F <run-dir>/scratch/commit-msg.txt`. Use no other commit form. A hook that rejects the commit is handled like a failing gate: read its output, fix what it reports (update the manifest, re-run the gates if files changed), and commit again, counting it against the limit of 3. Never skip, redirect or disable hooks, and never retry through another route (`bypass-hook`). If the fix is beyond this run's remit, end as `failed`, naming the hook and quoting its output briefly.
+### 6. Resolve resumable prior work, merged PRs, and resume markers
 
-12. **Enforce one commit.** Run `git rev-list --count origin/main..HEAD` (parent ref for stacked work). If it is 0, end as `failed`. If it is more than 1, collapse in place (`single-commit`; the regime is `commits`, so collapse applies):
-    - Record the tree with `git rev-parse HEAD^{tree}` and keep a backup with `git branch gaal/backup-<N>-<short-sha> HEAD`.
-    - Run `git reset --soft origin/main` (or the parent ref), then commit once with `git commit -F <run-dir>/scratch/commit-msg.txt`, the message rewritten as a whole for the change: process commits ("wip", "fix lint") dropped, no attribution, issue link per the rule above.
-    - Check that `git rev-parse HEAD^{tree}` equals the recorded tree. If not, or if the change nets to empty, restore with `git reset --hard <backup-branch>` and end as `failed`. Never use an interactive rebase.
-    - Re-check that `git rev-list --count origin/main..HEAD` is 1. Run `git rev-parse HEAD` to get `commit_sha` (40 hex chars) and `git branch --show-current` for `branch`. Confirm `git status --porcelain` is empty. The tree is identical, so the earlier green gate run still holds.
+1. **Check for prior merged PRs:**
+   - Search for pull requests associated with this issue's branch across all states: `gh pr list --repo 116-Labs/cuecal --head <branch> --state all --json number,state,mergedAt`.
+   - Never resume a branch whose pull request has already merged. After a squash merge, a local or remote branch still appears 1 commit ahead of the base, but its changes are already part of `main`. Resuming it re-submits work that already merged.
+   - When a merged-PR note is handed over in the prompt:
+     - Never check out or resume the old local branch it names, and never resume or build on the merged branch's commits.
+     - If a handed-over resume marker names a different branch, that branch's work still applies and may be adopted under the resume marker rules below.
+     - Otherwise, start fresh from the current base (`origin/main`), fetched now. The fresh branch may keep the branch scheme's name (e.g. recreate it at the fetched base with `git switch -C gaal/<N>-<slug> origin/main` without checking out the old branch). Implement only what the issue still asks for beyond the merged PR.
+2. **Without a merged-PR note:**
+   - Check for existing local branches for this issue: `git branch --list 'gaal/<N>-*'`. Resume an existing branch only if its state is sound (clean tree, commits cleanly on top of fetched `origin/main`).
+3. **Adopt a resume marker:**
+   - If the prompt handed over a resume marker (from an earlier implement run that reached the attempt limit with uncommitted work), inspect the checkout.
+   - Adopt the marker ONLY when all three conditions hold:
+     1. The marker's branch is checked out.
+     2. The base matches the marker's base (`main`).
+     3. The uncommitted dirty paths in the checkout match the marker's `paths` exactly.
+   - When adopted: these edits are this issue's work, not stray edits. Read the marker's saved plan (copying it to `<run-dir>/plan.md` to satisfy `plan-before-code`), place its `paths` into this run's manifest, reset the attempt counter to 0, and go directly to running the gates in step 10.
+   - If the marker fails any of the three conditions, ignore the marker. If the checkout then has dirty paths that are not this run's own, end as `needs-human`. In `reason`, list the dirty paths and specify which condition failed: the marker's branch is not checked out, the base differs, or the dirty paths differ from the marker's `paths`.
 
-13. **Write the run result to `$GAAL_RUN_DIR/result.json` on every exit path**, failures included (`run-result-written`). Run `date -u +%Y-%m-%dT%H:%M:%SZ` for `finished_at`. With the file tool, write `<run-dir>/result.json.tmp` as one JSON object, then run `mv <run-dir>/result.json.tmp <run-dir>/result.json`. Never leave the `.tmp` file behind. Fields:
-    - `schema_version`: `1`; `run_id`: the literal run id from the run context; `blueprint`: `"implement"`; `blueprint_version`: `"1.4.0"`; `repo`: `"116-Labs/cuecal"`; `issue`: the number (null if it could not be resolved); `pr`: `null`.
-    - `status`: one of the exit states below.
-    - `attempts`: gate-fix attempts consumed, at least 1 (use 1 when the run ended before any gate ran).
-    - `gates`: every gate actually run on the final tree, each with `name`, `command`, `exit_code`, `duration_ms`; an empty array if none ran.
-    - `branch` and `commit_sha`: set on `done`; otherwise the branch if one exists, and `null` for the sha when no commit exists.
-    - `reason`: required unless `done`; one sentence of at most 160 characters naming the decision or action needed. Detail goes in the final message.
-    - `questions`: required and non-empty for `needs-clarification`.
-    - `started_at`, `finished_at`: as read from the clock.
+### 7. Write the plan before any source edits (`plan-before-code`)
 
-    In the final message, list each acceptance criterion as met or not met, the gates that ran and any that did not and why, drift found, pre-existing debt noticed but left alone, hand-off notes (new exports, names) word for word, and any deploy or migration commands left for a human.
+1. Write a short, concrete implementation plan:
+   - List files to create or modify.
+   - List tests to add or update.
+   - For every numbered acceptance criterion, specify how it will be verified.
+   - Include notes on code references drift and existing code reuse from step 5.
+2. Save the plan using the file-editing tool to `<run-dir>/plan.md`. Never edit any source files before `<run-dir>/plan.md` exists (`plan-before-code`).
+3. Verify the plan against repository guards. If the plan requires any of the following, end as `needs-human` naming the guard and the required human action:
+   - An unapproved breaking change to a public API, CLI contract, configuration structure, SQLite schema, or persisted data format not explicitly requested by the issue (`unapproved-breaking-change`).
+   - Running any deployment, release publish, or migration against a shared environment (`deploy`). Record the commands for a human in the hand-off message, but never execute them.
+
+### 8. Create or switch to the isolated feature branch
+
+1. Unless an existing sound branch was resumed in step 6, create a fresh branch from `origin/main`:
+   `git switch -c gaal/<N>-<slug> origin/main`
+   where `<N>` is the issue number and `<slug>` is a short lowercase kebab-case summary of the issue title (`branches.prefix: gaal/`). (For stacked work, base the branch on the designated parent branch).
+2. Never work or commit directly on `main` (`base-untouched`).
+3. Dependency installation: the profile names no `install` command, so install nothing. Work in this checkout where dependencies are already installed.
+
+### 9. Implement the plan and track the manifest
+
+1. Read each file before making any edits. Keep all changes minimal, clean, and strictly scoped to the issue.
+2. Do not fix pre-existing debt or refactor unrelated code outside the issue's scope (`unrelated-refactor`); note pre-existing findings in the hand-off message instead.
+3. Add the unit and integration tests specified in the plan.
+4. Maintain a manifest of every file path created, modified, or written at `<run-dir>/manifest.txt` (written and updated with the file tool).
+5. Ensure every touched path is recorded in the manifest. A missing path from the manifest causes damage by sliding uncommitted edits into later stacked commits or dropping changes. Never include files this run did not write (`commit-foreign-edits`).
+
+### 10. Run profile gates and fix errors within attempt limits
+
+1. Run each required profile gate in order as separate commands. Increment the attempt counter before each full pass.
+   - **Gate 1 (`lint`):**
+     1. Run `date -u +%s`.
+     2. Run `uv run ruff check .`.
+     3. Run `date -u +%s`.
+     4. Record the `lint` gate entry: `name: "lint"`, `command: "uv run ruff check ."`, `exit_code`, and `duration_ms` = (end - start) * 1000.
+   - **Gate 2 (`test`):**
+     1. Run `date -u +%s`.
+     2. Run `uv run pytest`.
+     3. Run `date -u +%s`.
+     4. Record the `test` gate entry: `name: "test"`, `command: "uv run pytest"`, `exit_code`, and `duration_ms` = (end - start) * 1000.
+2. Both gates are required (`gates-green`). Run them exactly as written with no additional flags or arguments. Never mask an exit code through pipes or subshells (`status-preserved`). An unrun gate is absent from the result, never marked as passed (`truthful-report`).
+3. If any gate fails (non-zero exit code):
+   - Inspect the failure output, fix the root cause, update `<run-dir>/manifest.txt`, and re-run all gates from the beginning.
+   - Count each cycle against the limit of 3 attempts (`limits.implement_attempts` = 3, `bounded-attempts`).
+   - If the 3rd attempt fails, stop and end as `needs-human` with the failing gate output summarized in `reason` (one sentence, at most 160 characters). If uncommitted work remains, write the resume marker in step 11 before exiting.
+4. Gates pass only when both `lint` and `test` exit 0 on the final tree with no subsequent modifications.
+5. If advisory checks exist, fix only findings introduced by this run; base findings are left untouched and noted in the report (`unrelated-refactor`).
+
+### 11. Write resume marker (on attempt limit exit with uncommitted work)
+
+1. When stopping at the attempt limit (attempt 3 reached) and the working tree has uncommitted edits:
+   - Write `<run-dir>/resume.json` using the file-editing tool with:
+     - `schema_version`: `1`
+     - `run_id`: literal `GAAL_RUN_ID` string
+     - `issue`: issue number (integer)
+     - `branch`: current branch name
+     - `base`: `"main"`
+     - `paths`: array of strings matching `<run-dir>/manifest.txt` (must match the dirty working tree exactly; remove any extraneous untracked files so the tree and manifest agree)
+     - `plan`: `<run-dir>/plan.md` path (or `null`)
+2. Proceed directly to step 14 with status `needs-human`. Do not commit or revert the uncommitted work; Gaal will provide the resume marker to the next implement run.
+
+### 12. Stage explicitly and commit with verification hooks enabled
+
+1. Stage only the paths recorded in `<run-dir>/manifest.txt` using explicit path arguments:
+   `git add -- <path1> <path2> ...` (`explicit-staging`).
+   Never use `git add -A`, `git add .`, or `git commit -a`.
+2. Compare `git diff --cached --name-only` against `<run-dir>/manifest.txt`. The staged set must match the manifest exactly (`manifest-matches-staged`).
+3. Check `git status --porcelain` to confirm no other modifications from this run remain unstaged, and all pre-existing foreign files remain untouched.
+4. Write the commit message to `<run-dir>/commit-msg.txt` using the file tool:
+   - Follow the conventional commit format: `<type>(<scope>): <subject>` in the imperative mood without a trailing period.
+   - Describe the overall change rather than process steps ("wip", "fixed lint").
+   - Attribution policy is `none` (`commits.attribution: none`): do NOT include AI attribution, `Co-Authored-By`, or tool credits (`attribution-policy`).
+   - Follow the issue-link rule (`issue-trailer`):
+     - **Full change (all acceptance criteria met):** end with `Closes #N` on its own line.
+     - **Partial change (some criteria deferred):** end with `Refs #N` on its own line (never a closing keyword), followed by a `## Deferred` heading listing each open criterion worded exactly as in the issue. Never combine `Closes` with a Deferred list.
+5. Commit using `git commit -F <run-dir>/commit-msg.txt`.
+6. Verification hooks must remain enabled (`bypass-hook`). Never use `--no-verify`, `git commit -n`, `--no-gpg-sign`, or alter hook paths. If a hook rejects the commit, fix the reported issue, re-stage the manifest, and commit again, counting it as a gate-fix cycle. If the hook error is beyond this run's remit, end as `failed` quoting the hook output. If a fix modifies code, re-run all gates (step 10) before committing.
+
+### 13. Collapse in place and perform adversarial self-review
+
+1. **In-place collapse routine:**
+   - Check the commit count ahead of base: `git rev-list --count origin/main..HEAD`.
+   - The merge regime is `message_source: commits`, requiring exactly one commit on the branch (`single-commit`).
+   - If the count is 1, collapse is already satisfied.
+   - If the count is greater than 1, execute in-place collapse:
+     - Verify commit authorship: `git log --format=%an origin/main..HEAD`. If any commit was authored by someone else, stop and end as `needs-human`.
+     - Record the pre-collapse tree hash: `git rev-parse 'HEAD^{tree}'` and the old head SHA: `git rev-parse HEAD`.
+     - Reset softly to base: `git reset --soft origin/main`.
+     - Re-commit the unified change: `git commit -F <run-dir>/commit-msg.txt`.
+     - Content preservation: verify `git rev-parse 'HEAD^{tree}'` matches the pre-collapse tree hash. If the tree hash differs or the rewrite nets to an empty change, restore with `git reset --hard <old-sha>` and end as `failed`.
+     - Never use an interactive rebase, and never merge as admin (`admin-bypass`).
+     - Confirm `git rev-list --count origin/main..HEAD` outputs `1`.
+     - Record the 40-hex commit SHA with `git rev-parse HEAD` as `commit_sha`.
+2. **Adversarial self-review (`self-reviewed`):**
+   - Review the complete diff (`git diff origin/main...HEAD`) adversarially, as an independent reviewer who has not seen the plan.
+   - Verify each acceptance criterion, inspect edge cases, error handling, test coverage, consistency across code, docstrings, and tests, and ensure no changes exist outside the manifest.
+   - Fix any defects found within this run, running all gates (step 10) and updating the single commit (step 12-13). Record any items deliberately not fixed.
+3. **Plan drift reporting and issue update (`drift-reported`):**
+   - Identify every divergence from the plan in files, approach, or criteria.
+   - If the plan changed (scope, approach, or criteria), update the GitHub issue body to keep it aligned with the code:
+     Write the updated body to `<run-dir>/scratch/issue-body.md` with the file tool and execute `gh issue edit <N> --body-file <run-dir>/scratch/issue-body.md`.
+     Preserve the original issue text, placing all modifications between these exact marker lines:
+     `<!-- gaal:plan-drift -->`
+     `... drift details / updated criteria ...`
+     `<!-- /gaal:plan-drift -->`
+     (If issue body editing is unavailable, post a comment containing the opening marker).
+
+### 14. Write the run result atomically on every exit path
+
+1. Run `date -u +%Y-%m-%dT%H:%M:%SZ` and record the timestamp as `finished_at`.
+2. Write `<run-dir>/result.json.tmp` using the file-editing tool (`run-result-written`).
+3. Ensure the JSON is valid and contains exactly these fields:
+   - `schema_version`: `1`
+   - `run_id`: literal `GAAL_RUN_ID` string from the run context
+   - `blueprint`: `"implement"`
+   - `blueprint_version`: `"1.7.0"`
+   - `repo`: `"116-Labs/cuecal"`
+   - `issue`: issue number (integer), or `null` if unresolved
+   - `pr`: `null`
+   - `status`: `"done"`, `"needs-human"`, `"needs-clarification"`, or `"failed"`
+   - `reason`: required string unless status is `"done"`; exactly one sentence of at most 160 characters describing the required action or decision
+   - `questions`: required non-empty array of strings when status is `"needs-clarification"`, omitted otherwise
+   - `attempts`: positive integer (>= 1) representing gate-fix cycles consumed (use 1 if stopped before running gates)
+   - `gates`: array of gate executions on the final tree, each containing `name`, `command`, `exit_code`, and `duration_ms` (empty array `[]` if none ran)
+   - `branch`: branch name string (e.g. `"gaal/<N>-<slug>"`), or `null`
+   - `commit_sha`: 40-hex SHA string from `git rev-parse HEAD`, or `null`
+   - `started_at`: timestamp string from step 1
+   - `finished_at`: timestamp string from step 14
+4. Atomically move the file: `mv <run-dir>/result.json.tmp <run-dir>/result.json`. Never leave the `.tmp` file behind.
+5. In the final hand-off response (not in `reason`):
+   - State the self-review outcome and list each acceptance criterion as met or unmet.
+   - List the gates that ran and their status (`truthful-report`).
+   - State any plan drift and whether the issue body was updated with `<!-- gaal:plan-drift -->`.
+   - List any human-required migration, deploy, or follow-up commands (`deploy`).
 
 ## Exit states
 
-- `done`: the single commit exists, every gate exited 0 on the final tree, and `branch`, `commit_sha` and `gates` are set. A partial result uses `Refs #N` and a Deferred list, never a closing keyword.
-- `needs-clarification`: the spec is ambiguous, the code drifted from what the issue describes, or a criterion cannot be mapped to the plan. `questions` are specific and answerable, each naming the file or criterion it concerns.
-- `needs-human`: the attempt limit of 3 was reached (with `resume.json` written when the work is uncommitted); a risky-surface guard fired (breaking contract, schema or persisted-format change the issue did not ask for); the checkout had edits of unclear ownership (`reason` lists the dirty paths and, if a marker was handed over, the failed adoption condition); or a stacked rebase conflicted. `reason` says which and what a human should do.
-- `failed`: environment or tooling problems (repo or tracker unreachable, auth or rate-limit errors, disk, a hook rejection beyond this run's remit, a collapse that failed its tree check). `reason` includes enough to retry.
+- `done`: The single commit exists on the feature branch, passes all required profile gates (`uv run ruff check .`, `uv run pytest`), and `branch`, `commit_sha`, and `gates` are recorded in `result.json`. The hand-off message lists all acceptance criteria as met or unmet (using `Refs #N` with a Deferred list if partial).
+- `needs-clarification`: The issue specification is ambiguous or code references have drifted beyond safe assumptions. `questions` contains specific, answerable questions naming the relevant files or criteria. No source changes were committed.
+- `needs-human`: The gate-fix attempt limit (3) was reached (leaving `<run-dir>/resume.json` when work is uncommitted); a risky-surface guard fired (`unapproved-breaking-change`, `deploy`); or the checkout contained pre-existing edits of unclear ownership. `reason` states what happened and what a person should do (listing dirty paths and which resume marker adoption condition failed if applicable).
+- `failed`: Environment or tooling failure occurred (network error, API failure, dependency issue, hook failure beyond this run's remit, collapse content-preservation failure, or disk error). `reason` provides sufficient detail to retry.
 
 ## Invariants
 
-- `plan-before-code`: `<run-dir>/plan.md` exists, mapping every acceptance criterion, before the first source edit (step 6).
-- `single-commit`: at hand-off `git rev-list --count <base>..HEAD` is 1 (step 12).
-- `manifest-matches-staged`: the commit holds exactly the paths in the manifest (steps 9 and 11).
-- `gates-green`: `lint` and `test` both ran on the final tree and exited 0, and the result lists each (step 10).
-- `issue-trailer`: the message carries `Closes #N` only when every criterion is met, else `Refs #N` plus a Deferred list (step 11).
-- `bounded-attempts`: gate-fix cycles stop at 3 and end as `needs-human` (step 10).
-- `explicit-staging`: stage only manifest paths by explicit name (step 11).
-- `base-untouched`: never commit or push to `main` (step 8).
-- `fail-closed-reads`: a failed API read stops the run (step 3).
-- `complete-listings`: comments are paginated to the end (step 3).
-- `truthful-report`: the result and final message state only what happened; an unrun gate is absent (steps 10 and 13).
-- `status-preserved`: no command's failure is hidden by a chain, pipe or filter (steps 10 and 11).
-- `attribution-policy`: the message follows `commits.attribution: none` exactly (step 11).
-- `run-result-written`: `$GAAL_RUN_DIR/result.json` is written atomically on every exit path (step 13).
+- `plan-before-code`: `<run-dir>/plan.md` exists before the first source edit is made, and every acceptance criterion maps to part of it.
+- `single-commit`: At hand-off, the branch holds exactly one commit ahead of `main` (`git rev-list --count origin/main..HEAD` outputs 1).
+- `manifest-matches-staged`: The files in the commit match `<run-dir>/manifest.txt` exactly.
+- `gates-green`: Every required profile gate (`lint`: `uv run ruff check .`, `test`: `uv run pytest`) ran on the final tree and exited 0.
+- `issue-trailer`: The commit message links the issue: `Closes #N` only when every acceptance criterion is met, otherwise `Refs #N` with a `Deferred` heading listing open criteria.
+- `self-reviewed`: An adversarial review of the final diff ran before hand-off, and its fixes were verified through the gates and folded into the single commit.
+- `drift-reported`: Every drift from the plan is documented in the hand-off message; if the plan changed, the issue body was updated with `<!-- gaal:plan-drift -->` markers.
+- `bounded-attempts`: Gate-fix cycles stop at 3 attempts (`limits.implement_attempts`), ending as `needs-human`.
+- `explicit-staging`: Stage only paths this run wrote by explicit path arguments from `<run-dir>/manifest.txt`, never staging wholesale.
+- `base-untouched`: Never commit or push directly to `main`.
+- `fail-closed-reads`: A failed API call or command stops the run; errors are never treated as empty results or missing PRs.
+- `complete-listings`: Issue comments and metadata listings are paginated to the end or the run stops.
+- `truthful-report`: The report and run result describe only what actually occurred; unrun gates are omitted, never reported as passed.
+- `status-preserved`: Command exit codes are never lost or masked by pipes, filters, or subshells.
+- `attribution-policy`: The profile attribution policy is `none`; no AI attribution, co-author trailers, or tool credits are added.
+- `run-result-written`: `<run-dir>/result.json` is written atomically on every exit path, including failures.
 
 ## Forbidden actions
 
-- `absorb-stray-edits`: never commit, revert or reformat changes that were in the checkout before the run (step 7).
-- `deploy`: no deploys, migrations against shared environments, or publishes; hand the commands to a human (step 6).
-- `unapproved-breaking-change`: no breaking change to a public contract, schema or persisted format unless the issue explicitly asks (step 6).
-- `unrelated-refactor`: no fixing of pre-existing debt outside the change's scope; record it in the report (steps 5 and 9).
-- `ask-mid-run`: never wait on interactive input; end as `needs-clarification` with questions (step 4).
-- `bare-force-push`: this skill never pushes. If a force-push ever became necessary, only `--force-with-lease=<branch>:<sha>` on the inspected sha is acceptable.
-- `admin-bypass`: never merge, push or rewrite with admin privileges to get around branch protection or a hook.
-- `bypass-hook`: never skip, redirect or disable verification: no flag that skips hooks, no signing bypass, no change to where git looks for hooks, no hook manager switched off, no edit to hook files or `.git/config`, no retry through another route. Fix what the hook reports (step 11).
-- `machine-specific-paths`: no home directories, drive letters, private scripts or services in commands, plan or messages.
-- `commit-foreign-edits`: never commit changes this run did not make (steps 7 and 11).
+- `absorb-stray-edits`: Committing, reverting, or reformatting changes that were already present in the checkout before the run.
+- `deploy`: Executing deploys, publishes, or migrations against shared environments. Return commands in the hand-off for a human instead.
+- `unapproved-breaking-change`: Breaking a public API, CLI contract, SQLite schema, or persisted data format without explicit issue instructions.
+- `unrelated-refactor`: Fixing pre-existing debt or refactoring code outside the change's direct scope. Record it in the report instead.
+- `ask-mid-run`: Waiting for interactive user input during a headless run. End as `needs-clarification` with specific questions instead.
+- `bare-force-push`: Force-pushing without `--force-with-lease=<branch>:<sha>`. (This run does not push).
+- `admin-bypass`: Merging, pushing, or rewriting with admin privileges (`--admin`) to bypass branch protection, merge queues, or hooks.
+- `bypass-hook`: Committing or pushing with hooks skipped (`--no-verify`, `git commit -n`, `--no-gpg-sign`), editing hook files, or altering `core.hooksPath`. Fix hook errors directly.
+- `machine-specific-paths`: Hard-coding user home directories, drive letters, or machine-specific paths.
+- `commit-foreign-edits`: Committing files or edits not authored by this run.
