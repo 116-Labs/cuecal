@@ -63,8 +63,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             except KeyError:
                 logger.warning("sink %r not found; skipping sink writes", cfg.sink)
 
-            from cuecal.extract import extract
             import time
+
+            from cuecal.extract import extract
 
             sources = []
             for source_name in cfg.sources:

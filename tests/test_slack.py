@@ -78,8 +78,7 @@ def test_mrkdwn_unwrapping_variations():
         == "https://meet.google.com/abc-defg-hij"
     )
     assert (
-        unwrap_slack_mrkdwn("<mailto:alice@example.com|alice@example.com>")
-        == "alice@example.com"
+        unwrap_slack_mrkdwn("<mailto:alice@example.com|alice@example.com>") == "alice@example.com"
     )
     assert (
         unwrap_slack_mrkdwn("Ping <@U12345|alice> in <#C12345|general>")

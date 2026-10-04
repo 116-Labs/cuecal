@@ -23,8 +23,10 @@ from cuecal.models import Message
 
 logger = logging.getLogger(__name__)
 
+
 class MCPError(Exception):
     pass
+
 
 @dataclass
 class MCPMapping:
@@ -42,20 +44,21 @@ class MCPMapping:
     cursor_path: str = ""
     field_mapping: dict[str, str] | None = None
 
+
 def load_mapping(name: str) -> MCPMapping:
     # First check user config dir, then shipped mappings
     user_path = paths.config_path().parent / "mappings" / f"{name}.toml"
     shipped_path = Path(__file__).parent / "mappings" / f"{name}.toml"
-    
+
     path = user_path if user_path.exists() else shipped_path
     if not path.exists():
         raise MCPError(f"Mapping {name} not found")
-        
+
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise MCPError(f"Invalid TOML in {path}: {exc}") from exc
-        
+
     return MCPMapping(
         name=name,
         transport=data.get("transport", "stdio"),
@@ -69,8 +72,9 @@ def load_mapping(name: str) -> MCPMapping:
         list_args=data.get("list_args", {}),
         items_path=data.get("items_path", ""),
         cursor_path=data.get("cursor_path", ""),
-        field_mapping=data.get("field_mapping", {})
+        field_mapping=data.get("field_mapping", {}),
     )
+
 
 def _resolve_json_path(data: Any, path: str) -> Any:
     if not path:
@@ -80,6 +84,7 @@ def _resolve_json_path(data: Any, path: str) -> Any:
             return None
         data = data.get(part)
     return data
+
 
 class MCPSource:
     def __init__(self, name: str, mapping: MCPMapping):
@@ -94,9 +99,7 @@ class MCPSource:
             if not self.mapping.command:
                 raise MCPError("stdio transport requires 'command'")
             server_params = StdioServerParameters(
-                command=self.mapping.command,
-                args=self.mapping.args or [],
-                env=None
+                command=self.mapping.command, args=self.mapping.args or [], env=None
             )
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
@@ -111,7 +114,7 @@ class MCPSource:
                 if not token:
                     raise MCPError(f"Secret not found for provider {self.mapping.auth_provider}")
                 headers[self.mapping.auth_header] = f"{self.mapping.auth_prefix}{token}"
-            
+
             async with sse_client(self.mapping.url, headers=headers) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -130,16 +133,16 @@ class MCPSource:
                     args[k] = v.format(cursor=cursor)
                 else:
                     if v == "{cursor}":
-                        del args[k] # omit it completely if not provided
+                        del args[k]  # omit it completely if not provided
                     else:
                         args[k] = v.replace("{cursor}", "")
-        
+
         result = await session.call_tool(self.mapping.list_tool, arguments=args)
         if getattr(result, "isError", False):
             raise MCPError(f"Tool error: {result.content}")
         if not result.content:
             raise MCPError("Tool returned empty content")
-            
+
         # Tool result content is a list of TextContent/ImageContent etc.
         # Assuming JSON string in the first text content
         text_content = result.content[0].text
@@ -147,17 +150,17 @@ class MCPSource:
             data = json.loads(text_content)
         except json.JSONDecodeError as exc:
             raise MCPError(f"Tool returned invalid JSON: {exc}") from exc
-            
+
         items = _resolve_json_path(data, self.mapping.items_path)
         if not isinstance(items, list):
             raise MCPError(f"Items path {self.mapping.items_path!r} did not resolve to a list")
-            
+
         next_cursor = _resolve_json_path(data, self.mapping.cursor_path) or cursor or ""
-        
+
         messages = []
         for item in items:
             messages.append(self._parse_message(item))
-            
+
         return messages, str(next_cursor)
 
     def _parse_message(self, item: dict[str, Any]) -> Message:
@@ -168,7 +171,7 @@ class MCPSource:
             ts_val = _resolve_json_path(item, fm.get("ts", "ts"))
             text_val = _resolve_json_path(item, fm.get("text", "text"))
             permalink_val = _resolve_json_path(item, fm.get("permalink", "permalink"))
-            
+
             if id_val is None or sender_val is None or ts_val is None or text_val is None:
                 raise ValueError("missing required field in tool output")
 
@@ -193,9 +196,7 @@ class MCPSource:
             if not self.mapping.command:
                 raise MCPError("stdio transport requires 'command'")
             server_params = StdioServerParameters(
-                command=self.mapping.command,
-                args=self.mapping.args or [],
-                env=None
+                command=self.mapping.command, args=self.mapping.args or [], env=None
             )
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
@@ -215,7 +216,7 @@ class MCPSource:
                     result = await session.list_tools()
         else:
             raise MCPError(f"Unknown transport: {self.mapping.transport}")
-            
+
         tool_names = [t.name for t in result.tools]
         if self.mapping.list_tool not in tool_names:
             raise MCPError(

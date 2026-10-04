@@ -196,9 +196,7 @@ def parse_template(text: str, source_ref: str | None = None) -> MeetingCandidate
         return None
     try:
         naive = dateparser.parse(f"{dm.group(1)} {m.group('start')}", fuzzy=False)
-        end_naive = (
-            dateparser.parse(f"{dm.group(1)} {m.group('end')}") if m.group("end") else None
-        )
+        end_naive = dateparser.parse(f"{dm.group(1)} {m.group('end')}") if m.group("end") else None
     except (ValueError, OverflowError):
         return None
     tz_key = resolve_tz(m.group("tz"))
