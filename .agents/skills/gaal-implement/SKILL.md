@@ -2,7 +2,7 @@
 name: gaal-implement
 description: Implements one qualified GitHub issue in 116-Labs/cuecal as a verified change on its own `gaal/` branch holding exactly one commit, then writes the run result to `$GAAL_RUN_DIR/result.json`. Use when a dispatch hands you a repo and issue number that already passed qualification and asks for the `implement` step, before any PR exists. Do not use to open a PR, revise a PR after review, review a PR, or merge; those are other steps. Do not use for issues that have not been qualified.
 ---
-<!-- gaal-stamp blueprint=implement@1.7.0 shared=1.4.0 profile=7d4c49f36df8465f generated=2026-10-03 core=e7ca0d74f7c8e378 forbidden=e3a5c6b1ec65f2a7 content=dac0d133d2ef1523 -->
+<!-- gaal-stamp blueprint=implement@1.7.0 shared=1.4.0 profile=833de6ae33df6d68 generated=2026-10-04 core=e7ca0d74f7c8e378 forbidden=e3a5c6b1ec65f2a7 content=dac0d133d2ef1523 -->
 
 # gaal-implement
 

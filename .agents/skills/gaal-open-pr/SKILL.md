@@ -2,7 +2,7 @@
 name: gaal-open-pr
 description: Publishes a finished single-commit branch in 116-Labs/cuecal as one pull request against `main` that links its issue, then writes the run result to `$GAAL_RUN_DIR/result.json`. Use when a dispatch or the user asks for the `open-pr` step (open, send or publish a PR) for work that is already implemented and verified, with the branch given or checked out. Do not use to implement an issue, revise a PR after review, review a PR, or merge; those are other steps. Do not use when there is no commit ahead of `main`; end as `failed` instead.
 ---
-<!-- gaal-stamp blueprint=open-pr@1.5.0 shared=1.4.0 profile=7d4c49f36df8465f generated=2026-10-03 core=8e0af7dc54831991 forbidden=f5c350c8651b613b content=64e7e4ecf202eb97 -->
+<!-- gaal-stamp blueprint=open-pr@1.5.0 shared=1.4.0 profile=833de6ae33df6d68 generated=2026-10-04 core=8e0af7dc54831991 forbidden=f5c350c8651b613b content=b2fe664755a463e7 -->
 
 # gaal-open-pr
 
@@ -76,11 +76,11 @@ Publish a finished change as a pull request against the base. The pushed branch 
    - Check if an open PR already exists for this branch: `gh pr list --repo 116-Labs/cuecal --state open --head <branch> --limit 200 --json number,url,headRefName`.
    - **Approved PR content check (`content-free-push-after-approval`):**
      - Before collapsing, if an open PR already exists for this branch and holds required approvals (`review.required_approvals: 1`):
-       - Count approvals from `gh api repos/116-Labs/cuecal/pulls/<n>/reviews --paginate` (`complete-listings`): each reviewer whose latest review is `APPROVED` and not dismissed.
+       - Count approvals from `gh api repos/116-Labs/cuecal/pulls/<number>/reviews --paginate` (`complete-listings`): each reviewer whose latest review is `APPROVED` and not dismissed.
        - Because `review.dismiss_stale_approvals` and `review.require_last_push_approval` are absent/unknown, a push would invalidate approvals on the current head.
        - Fetch the remote head: `git fetch origin <branch>`.
        - Compare local tree hash (`git rev-parse HEAD^{tree}`) with remote head tree hash (`git rev-parse origin/<branch>^{tree}`).
-       - If the tree hashes are equal and the PR is neither `CONFLICTING` nor `DIRTY` (checked via `gh pr view <n> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus`) nor a stacked child whose parent merged:
+       - If the tree hashes are equal and the PR is neither `CONFLICTING` nor `DIRTY` (checked via `gh pr view <number> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus`) nor a stacked child whose parent merged:
          - **Push nothing:** no collapse and no rebase onto a base that merely moved (`content-free-push-after-approval`).
          - Skip to step 9 and report the PR as published and unchanged.
    - **Base drift check before push (`base-drift-checked`):**
@@ -96,7 +96,7 @@ Publish a finished change as a pull request against the base. The pushed branch 
        - Branch must not live on a fork: `git remote get-url origin` must match `116-Labs/cuecal`.
        - Every commit must be authored by the user: compare `git log --format=%ae origin/<base>..HEAD` with `git config user.email`.
        - If the branch exists on remote, read its head with `git ls-remote --heads origin <branch>` and confirm it is an ancestor of HEAD with `git merge-base --is-ancestor <remote-sha> HEAD`.
-     - Check soft gates: if a PR already exists, read approvals and threads (`gh pr view <n> --repo 116-Labs/cuecal --json reviewDecision,reviews` and paginated GraphQL `reviewThreads`). Print thread count. An existing approval or unreadable setting refuses collapse and ends as `failed`.
+     - Check soft gates: if a PR already exists, read approvals and threads (`gh pr view <number> --repo 116-Labs/cuecal --json reviewDecision,reviews` and paginated GraphQL `reviewThreads`). Print thread count. An existing approval or unreadable setting refuses collapse and ends as `failed`.
      - Perform collapse:
        - Run `git rev-parse HEAD` for `<old-sha>`. Run `git rev-parse HEAD^{tree}` for `<pre-tree>`.
        - Run `git merge-base origin/<base> HEAD` for `<merge-base-sha>`, then `git reset --soft <merge-base-sha>`.
@@ -119,9 +119,9 @@ Publish a finished change as a pull request against the base. The pushed branch 
    - If branch is not on remote: `git push -u origin <branch>`.
    - If branch exists on remote and history was rewritten in step 6: push with explicit lease `git push --force-with-lease=<branch>:<remote-sha> origin <branch>`. (If fast-forward, `git push origin <branch>`).
    - Never skip, redirect, or disable verification hooks (no `--no-verify`, `git commit -n`, `--no-gpg-sign`, `-c core.hooksPath=...`, switching off hook managers, or editing hook files / git config) (`bypass-hook`). If a hook rejects the push, fix what it reports. If the fix requires changes beyond this step's remit, end as `failed` naming the hook output.
-   - For a stacked PR whose parent has merged: rebase the child onto `main`, then update the PR base with `gh pr edit <n> --repo 116-Labs/cuecal --base main`.
+   - For a stacked PR whose parent has merged: rebase the child onto `main`, then update the PR base with `gh pr edit <number> --repo 116-Labs/cuecal --base main`.
    - **Post-push drift check:**
-     - Once the PR exists (or after creation in step 9 for a new PR), read `gh pr view <n> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus,baseRefOid`. (If `mergeable` is `UNKNOWN`, wait briefly and re-read).
+     - Once the PR exists (or after creation in step 9 for a new PR), read `gh pr view <number> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus,baseRefOid`. (If `mergeable` is `UNKNOWN`, wait briefly and re-read).
      - Compare `baseRefOid` with `<base-sha>` recorded in step 6.
      - If `baseRefOid` differs from `<base-sha>` (base moved while the run worked), or the PR is `CONFLICTING` or `DIRTY`:
        - Rebase onto the fresh base within single-commit rules. If the rebase conflicts, abort with `git rebase --abort` and end as `needs-human` naming the conflict.
@@ -146,12 +146,12 @@ Publish a finished change as a pull request against the base. The pushed branch 
        - Leave unticked (`- [ ]`) any gate that did not run or failed, noting the reason beside it.
      - Attribution: Add no AI attribution and no provenance section (`attribution-policy`: `none`).
    - If an open PR already exists:
-     - Update it with `gh pr edit <n> --repo 116-Labs/cuecal --body-file <run-dir>/scratch/pr-body.md` instead of opening a second (`one-pr-per-issue`).
+     - Update it with `gh pr edit <number> --repo 116-Labs/cuecal --body-file <run-dir>/scratch/pr-body.md` instead of opening a second (`one-pr-per-issue`).
    - If no PR exists:
-     - Create the PR: `gh pr create --repo 116-Labs/cuecal --base main --head <branch> --title "<commit subject>" --body-file <run-dir>/scratch/pr-body.md`. (For a stacked PR, use the stacked base). Record the number and URL.
+     - Create the PR: `gh pr create --repo 116-Labs/cuecal --base main --head <branch> --title "<commit-subject>" --body-file <run-dir>/scratch/pr-body.md`. (For a stacked PR, use the stacked base). Record the number and URL.
    - If the issue number only becomes known after the PR exists, amend just the trailer:
      - Save message before with `git log -1 --format=%B`.
-     - Write the new message to a file and run `git commit --amend -F <file>`.
+     - Write the new message to `<run-dir>/scratch/commit-msg.txt` and run `git commit --amend -F <run-dir>/scratch/commit-msg.txt`.
      - Diff the message before and after to prove nothing else changed, and confirm the tree hash is unchanged.
      - Push with `git push --force-with-lease=<branch>:<old-head-sha> origin <branch>`.
      - Update the PR body to match.
