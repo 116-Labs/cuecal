@@ -20,6 +20,9 @@ cuecal = "cuecal.cli:main"
 [project.entry-points."cuecal.sources"]
 gmail = "cuecal.sources.gmail:GmailSource"
 
+[project.entry-points."cuecal.sinks"]
+google-calendar = "cuecal.sinks.google:GoogleCalendarSink"
+
 [dependency-groups]
 dev = [
     "pytest>=8",

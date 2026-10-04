@@ -40,7 +40,7 @@ def test_doctor_reports_paths_backend_and_plugins(tmp_path, capsys):
     assert f"config path: {tmp_path / 'config.toml'}" in out
     assert f"db path: {tmp_path / 'state.db'}" in out
     assert "keyring backend:" in out
-    assert "sinks: ics" in out
+    assert "sinks: google-calendar, ics" in out
     assert "sources: gmail" in out
 
 
