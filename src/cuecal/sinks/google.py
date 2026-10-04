@@ -1,0 +1,363 @@
+"""Google Calendar sink adapter implementing the Sink protocol."""
+
+from __future__ import annotations
+
+import json
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from dateutil import parser as dateparser
+
+from cuecal import secrets
+from cuecal.models import MeetingCandidate
+from cuecal.sinks.base import SinkEvent
+
+logger = logging.getLogger("cuecal.sinks.google")
+
+GOOGLE_CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3"
+
+
+def parse_calendar_event(data: dict[str, Any]) -> SinkEvent:
+    """Parse a Google Calendar REST API event resource into a cuecal SinkEvent."""
+    event_id = data.get("id", "")
+    title = data.get("summary", "")
+
+    start_raw = data.get("start", {})
+    end_raw = data.get("end", {})
+
+    start_str = start_raw.get("dateTime") or start_raw.get("date") or ""
+    end_str = end_raw.get("dateTime") or end_raw.get("date") or ""
+
+    if start_str:
+        try:
+            start_dt = dateparser.parse(start_str)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=UTC)
+        except (ValueError, OverflowError):
+            start_dt = datetime.now(UTC)
+    else:
+        start_dt = datetime.now(UTC)
+
+    if end_str:
+        try:
+            end_dt = dateparser.parse(end_str)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=UTC)
+        except (ValueError, OverflowError):
+            end_dt = start_dt + timedelta(minutes=30)
+    else:
+        end_dt = start_dt + timedelta(minutes=30)
+
+    location = data.get("location")
+    description = data.get("description")
+    meeting_id = (
+        data.get("extendedProperties", {}).get("private", {}).get("cuecalMeetingId")
+    )
+    html_link = data.get("htmlLink")
+
+    return SinkEvent(
+        id=event_id,
+        title=title,
+        start=start_dt,
+        end=end_dt,
+        location=location,
+        description=description,
+        meeting_id=meeting_id,
+        html_link=html_link,
+        raw=data,
+    )
+
+
+class GoogleCalendarSink:
+    """Google Calendar native sink adapter implementing the Sink protocol."""
+
+    name: str = "google-calendar"
+
+    def __init__(
+        self,
+        token_provider: str | Callable[[], str] | None = None,
+        *,
+        calendar_id: str = "primary",
+        secret_ref: str | None = None,
+        dry_run: bool = False,
+        http_client: Any = None,
+    ) -> None:
+        self.token_provider = token_provider
+        self.calendar_id = calendar_id
+        self.secret_ref = secret_ref
+        self.dry_run = dry_run
+        self._http_client = http_client
+
+    def _get_token(self) -> str:
+        if callable(self.token_provider):
+            return self.token_provider()
+        if isinstance(self.token_provider, str):
+            return self.token_provider
+        if self.secret_ref:
+            token = secrets.get_secret(self.secret_ref)
+            if token:
+                return token
+        token = secrets.get_secret("google")
+        if token:
+            if token.startswith("{"):
+                try:
+                    data = json.loads(token)
+                    return data.get("access_token") or data.get("token") or token
+                except json.JSONDecodeError:
+                    pass
+            return token
+        return ""
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if self._http_client is not None:
+            if hasattr(self._http_client, "request"):
+                return self._http_client.request(method, path, params=params, json=body)
+            method_lower = method.lower()
+            if hasattr(self._http_client, method_lower):
+                handler = getattr(self._http_client, method_lower)
+                try:
+                    return handler(path, params=params, json=body)
+                except TypeError:
+                    return handler(path, params=params, body=body)
+            if callable(self._http_client):
+                return self._http_client(method, path, params=params, body=body)
+
+        token = self._get_token()
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "cuecal/0.1.0",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        data_bytes = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data_bytes = json.dumps(body).encode("utf-8")
+
+        url = f"{GOOGLE_CALENDAR_API_BASE}{path}"
+        if params:
+            encoded_params = urllib.parse.urlencode(
+                {k: v for k, v in params.items() if v is not None}
+            )
+            url = f"{url}?{encoded_params}"
+
+        req = urllib.request.Request(
+            url,
+            data=data_bytes,
+            headers=headers,
+            method=method.upper(),
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                raw_resp = resp.read()
+                if not raw_resp:
+                    return {}
+                return json.loads(raw_resp.decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            if err.code in (429, 503):
+                retry_after = err.headers.get("Retry-After")
+                logger.warning(
+                    "Google Calendar API rate limited (%d), Retry-After: %s",
+                    err.code,
+                    retry_after,
+                )
+            raise
+
+    def _candidate_to_event_body(self, c: MeetingCandidate) -> dict[str, Any]:
+        if c.start is None:
+            raise ValueError("MeetingCandidate.start is required to format calendar event")
+
+        start_dt = c.start
+        end_dt = c.end or (start_dt + timedelta(minutes=30))
+
+        start_dict: dict[str, Any] = {"dateTime": start_dt.isoformat()}
+        end_dict: dict[str, Any] = {"dateTime": end_dt.isoformat()}
+
+        if c.tz:
+            start_dict["timeZone"] = c.tz
+            end_dict["timeZone"] = c.tz
+        elif start_dt.tzinfo is not None:
+            start_dict["timeZone"] = str(start_dt.tzinfo)
+            if end_dt.tzinfo is not None:
+                end_dict["timeZone"] = str(end_dt.tzinfo)
+
+        body: dict[str, Any] = {
+            "summary": c.title or "Meeting",
+            "start": start_dict,
+            "end": end_dict,
+        }
+
+        if c.join_url:
+            body["location"] = c.join_url
+            body["conferenceData"] = {
+                "entryPoints": [
+                    {
+                        "entryPointType": "video",
+                        "uri": c.join_url,
+                        "label": c.join_url,
+                    }
+                ],
+                "conferenceSolution": {
+                    "name": "Video Conference",
+                    "key": {
+                        "type": (
+                            "eventHangout"
+                            if "meet.google.com" in c.join_url
+                            else "addOn"
+                        )
+                    },
+                },
+            }
+
+        desc_lines: list[str] = []
+        if c.source_ref:
+            desc_lines.append(f"Source: {c.source_ref}")
+        if c.join_url:
+            desc_lines.append(f"Join URL: {c.join_url}")
+        if c.passcode:
+            desc_lines.append(f"Passcode: {c.passcode}")
+        if c.meeting_id:
+            desc_lines.append(f"Meeting ID: {c.meeting_id}")
+        if c.attendees:
+            desc_lines.append(f"Attendees: {', '.join(c.attendees)}")
+
+        if desc_lines:
+            body["description"] = "\n".join(desc_lines)
+
+        if c.meeting_id:
+            body["extendedProperties"] = {
+                "private": {
+                    "cuecalMeetingId": c.meeting_id,
+                }
+            }
+
+        if c.attendees:
+            body["attendees"] = [
+                {"email": a} if "@" in a else {"displayName": a} for a in c.attendees
+            ]
+
+        return body
+
+    def find_by_meeting_id(self, meeting_id: str) -> SinkEvent | None:
+        """Look up an existing sink event by its unique meeting ID."""
+        encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
+        params = {"privateExtendedProperty": f"cuecalMeetingId={meeting_id}"}
+        resp = self._request("GET", f"/calendars/{encoded_cal}/events", params=params)
+        items = resp.get("items", [])
+        for item in items:
+            if item.get("status") != "cancelled":
+                return parse_calendar_event(item)
+        return None
+
+    def create(self, c: MeetingCandidate) -> SinkEvent:
+        """Create a new event from a MeetingCandidate (idempotent if meeting_id exists)."""
+        if c.meeting_id:
+            existing = self.find_by_meeting_id(c.meeting_id)
+            if existing is not None:
+                logger.info(
+                    "Event already exists for meeting_id %s; updating existing event %s",
+                    c.meeting_id,
+                    existing.id,
+                )
+                return self.update(existing.id, c)
+
+        body = self._candidate_to_event_body(c)
+
+        if self.dry_run:
+            logger.info(
+                "[DRY RUN] Would create Google Calendar event: %s at %s",
+                c.title,
+                c.start,
+            )
+            start_dt = c.start or datetime.now(UTC)
+            end_dt = c.end or (start_dt + timedelta(minutes=30))
+            return SinkEvent(
+                id=f"dry-run-{c.meeting_id or 'new'}",
+                title=c.title or "Meeting",
+                start=start_dt,
+                end=end_dt,
+                location=c.join_url,
+                description=body.get("description"),
+                meeting_id=c.meeting_id,
+                html_link="https://calendar.google.com/calendar/event?eid=dryrun",
+                raw=body,
+            )
+
+        encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
+        params: dict[str, Any] = {}
+        if "conferenceData" in body:
+            params["conferenceDataVersion"] = 1
+
+        resp = self._request(
+            "POST",
+            f"/calendars/{encoded_cal}/events",
+            params=params or None,
+            body=body,
+        )
+        return parse_calendar_event(resp)
+
+    def update(self, event_id: str, c: MeetingCandidate) -> SinkEvent:
+        """Update an existing sink event with new candidate details."""
+        body = self._candidate_to_event_body(c)
+
+        if self.dry_run:
+            logger.info(
+                "[DRY RUN] Would update Google Calendar event %s: %s",
+                event_id,
+                c.title,
+            )
+            start_dt = c.start or datetime.now(UTC)
+            end_dt = c.end or (start_dt + timedelta(minutes=30))
+            return SinkEvent(
+                id=event_id,
+                title=c.title or "Meeting",
+                start=start_dt,
+                end=end_dt,
+                location=c.join_url,
+                description=body.get("description"),
+                meeting_id=c.meeting_id,
+                html_link=f"https://calendar.google.com/calendar/event?eid={event_id}",
+                raw=body,
+            )
+
+        encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
+        encoded_event = urllib.parse.quote(event_id, safe="")
+        params: dict[str, Any] = {}
+        if "conferenceData" in body:
+            params["conferenceDataVersion"] = 1
+
+        resp = self._request(
+            "PATCH",
+            f"/calendars/{encoded_cal}/events/{encoded_event}",
+            params=params or None,
+            body=body,
+        )
+        return parse_calendar_event(resp)
+
+    def busy(self, start: datetime, end: datetime) -> list[SinkEvent]:
+        """Return existing events overlapping the given time window."""
+        start_iso = start.isoformat() if start.tzinfo else start.replace(tzinfo=UTC).isoformat()
+        end_iso = end.isoformat() if end.tzinfo else end.replace(tzinfo=UTC).isoformat()
+
+        encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
+        params = {
+            "timeMin": start_iso,
+            "timeMax": end_iso,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+        }
+        resp = self._request("GET", f"/calendars/{encoded_cal}/events", params=params)
+        items = resp.get("items", [])
+        return [parse_calendar_event(item) for item in items if item.get("status") != "cancelled"]
