@@ -1,0 +1,21 @@
+{
+  "id": "neg-004-invoice",
+  "category": "negatives",
+  "label": "not_invite",
+  "input": {
+    "text": "Your monthly invoice INV-2026-9918 is ready. Total due: $24.00. Payment will be automatically processed on Oct 5, 2026.",
+    "received_at": "2026-10-01T07:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "billing@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "not_invite",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Billing notification email with date, but no meeting context",
+    "is_synthetic": true
+  }
+}

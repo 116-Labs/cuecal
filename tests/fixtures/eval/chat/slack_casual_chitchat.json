@@ -1,0 +1,21 @@
+{
+  "id": "chat-003-slack-chitchat",
+  "category": "chat",
+  "label": "not_invite",
+  "input": {
+    "text": "Did anyone catch the soccer match yesterday? What a comeback in extra time!",
+    "received_at": "2026-10-04T09:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "frank@example.com",
+    "permalink": "https://slack.com/archives/C-RANDOM/p1600000006",
+    "attachments": []
+  },
+  "expected": {
+    "label": "not_invite",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Casual chat watercooler message",
+    "is_synthetic": true
+  }
+}

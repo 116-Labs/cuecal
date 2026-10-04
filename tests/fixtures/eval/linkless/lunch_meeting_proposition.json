@@ -1,0 +1,32 @@
+{
+  "id": "linkless-002-coffee-sync",
+  "category": "linkless",
+  "label": "new_invite",
+  "input": {
+    "text": "Let's do a 1:1 sync over coffee tomorrow at 2:00 PM Pacific at the ground floor cafe.",
+    "received_at": "2026-10-04T10:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "sarah@example.com",
+    "permalink": "https://slack.com/archives/D123/p1600000003",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "1:1 sync over coffee",
+      "start": "2026-10-05T14:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": null,
+      "meeting_id": null,
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.75,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Informal 1:1 in-person coffee chat with explicit time and relative day",
+    "is_synthetic": true
+  }
+}

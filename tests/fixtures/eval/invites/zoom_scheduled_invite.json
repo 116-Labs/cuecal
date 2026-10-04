@@ -1,0 +1,32 @@
+{
+  "id": "inv-001-zoom-template",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Hi team,\n\nTopic: Sprint 42 Planning\nTime: Oct 15, 2026 10:00 AM Pacific Time (US and Canada)\n\nJoin Zoom Meeting\nhttps://zoom.us/j/89012345678\n\nMeeting ID: 890 1234 5678\nPasscode: 482910",
+    "received_at": "2026-10-01T09:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "alice@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Sprint 42 Planning",
+      "start": "2026-10-15T10:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/j/89012345678",
+      "meeting_id": "89012345678",
+      "passcode": "482910",
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Standard Zoom template email invite",
+    "is_synthetic": true
+  }
+}

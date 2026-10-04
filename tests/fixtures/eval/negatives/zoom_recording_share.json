@@ -1,0 +1,21 @@
+{
+  "id": "neg-002-zoom-recording",
+  "category": "negatives",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "For those who missed yesterday's All-Hands, here is the recording: https://zoom.us/rec/play/918273645?startTime=1696000000000. Passcode: rec2026!",
+    "received_at": "2026-10-02T16:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "hr@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Past meeting recording link, should not be extracted as an upcoming meeting invite",
+    "is_synthetic": true
+  }
+}

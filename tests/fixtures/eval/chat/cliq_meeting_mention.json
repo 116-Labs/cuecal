@@ -1,0 +1,21 @@
+{
+  "id": "chat-004-cliq-mention",
+  "category": "chat",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "Can someone remind me what we agreed on in this morning's sprint sync regarding API error response formatting?",
+    "received_at": "2026-10-04T14:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "gina@example.com",
+    "permalink": "https://cliq.zoho.com/chats/123/messages/456",
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Cliq message asking about past meeting notes",
+    "is_synthetic": true
+  }
+}

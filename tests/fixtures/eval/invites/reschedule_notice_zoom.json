@@ -1,0 +1,32 @@
+{
+  "id": "inv-003-zoom-reschedule",
+  "category": "invites",
+  "label": "reschedule",
+  "input": {
+    "text": "Notice: The Architecture Review has been rescheduled.\n\nNew Time: Oct 20, 2026 11:00 AM Pacific Time (US and Canada)\nJoin Zoom Meeting: https://zoom.us/j/77654321098\nMeeting ID: 776 5432 1098\nPasscode: 112233",
+    "received_at": "2026-10-03T10:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "carol@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "Architecture Review",
+      "start": "2026-10-20T11:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/j/77654321098",
+      "meeting_id": "77654321098",
+      "passcode": "112233",
+      "attendees": [],
+      "confidence": 0.85,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoom meeting rescheduled to a new time",
+    "is_synthetic": true
+  }
+}

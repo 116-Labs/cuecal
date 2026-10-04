@@ -1,0 +1,32 @@
+{
+  "id": "chat-001-slack-zoom",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Quick sync on the API outage in 10 mins: https://zoom.us/j/98765432109 Passcode: 000111",
+    "received_at": "2026-10-04T18:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "oncall@example.com",
+    "permalink": "https://slack.com/archives/C-WAR-ROOM/p1600000004",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Quick sync on the API outage",
+      "start": "2026-10-04T18:10:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/j/98765432109",
+      "meeting_id": "98765432109",
+      "passcode": "000111",
+      "attendees": [],
+      "confidence": 0.85,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Slack war-room ad-hoc sync link with relative start time",
+    "is_synthetic": true
+  }
+}

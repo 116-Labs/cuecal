@@ -1,0 +1,32 @@
+{
+  "id": "chat-002-slack-cancel",
+  "category": "chat",
+  "label": "cancel",
+  "input": {
+    "text": "Canceling today's design critique at 3pm, feel free to share your Figma links async in this channel instead.",
+    "received_at": "2026-10-04T13:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "design-lead@example.com",
+    "permalink": "https://slack.com/archives/C-DESIGN/p1600000005",
+    "attachments": []
+  },
+  "expected": {
+    "label": "cancel",
+    "candidate": {
+      "title": "design critique",
+      "start": "2026-10-04T15:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": null,
+      "meeting_id": null,
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Slack channel meeting cancellation",
+    "is_synthetic": true
+  }
+}

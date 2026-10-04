@@ -1,0 +1,21 @@
+{
+  "id": "linkless-004-offhand-reference",
+  "category": "linkless",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "We should definitely meet sometime next month to discuss budget, maybe after the sprint completes.",
+    "received_at": "2026-10-04T12:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "finance@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Vague aspirational meeting reference without concrete time or intent",
+    "is_synthetic": true
+  }
+}
