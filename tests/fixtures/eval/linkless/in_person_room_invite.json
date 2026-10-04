@@ -1,0 +1,32 @@
+{
+  "id": "linkless-001-room-invite",
+  "category": "linkless",
+  "label": "new_invite",
+  "input": {
+    "text": "Team standup tomorrow at 9:30 AM in Conference Room 4B. Please bring your laptop.",
+    "received_at": "2026-10-04T16:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "manager@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Team standup",
+      "start": "2026-10-05T09:30:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": null,
+      "meeting_id": null,
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Physical in-person meeting invite without virtual conference URL",
+    "is_synthetic": true
+  }
+}

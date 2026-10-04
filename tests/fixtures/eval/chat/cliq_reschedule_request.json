@@ -1,0 +1,32 @@
+{
+  "id": "chat-005-cliq-reschedule",
+  "category": "chat",
+  "label": "reschedule",
+  "input": {
+    "text": "Hey, can we push our 3:00 PM call to 4:00 PM today? Here's the link: https://meet.google.com/abc-wxyz-qrs",
+    "received_at": "2026-10-04T13:45:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "harry@example.com",
+    "permalink": "https://cliq.zoho.com/chats/123/messages/789",
+    "attachments": []
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "Call",
+      "start": "2026-10-04T16:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://meet.google.com/abc-wxyz-qrs",
+      "meeting_id": "abc-wxyz-qrs",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Cliq chat message requesting to reschedule a call with Google Meet link",
+    "is_synthetic": true
+  }
+}

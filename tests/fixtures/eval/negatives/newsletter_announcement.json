@@ -1,0 +1,21 @@
+{
+  "id": "neg-003-newsletter",
+  "category": "negatives",
+  "label": "not_invite",
+  "input": {
+    "text": "Tech Weekly Digest #142\n\nTop stories this week:\n- Python 3.13 released\n- Best practices for MCP server development\n- How to build resilient SQLite apps\n\nUnsubscribe here: https://example.com/unsubscribe",
+    "received_at": "2026-10-02T08:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "newsletter@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "not_invite",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Marketing newsletter email, completely non-invite",
+    "is_synthetic": true
+  }
+}

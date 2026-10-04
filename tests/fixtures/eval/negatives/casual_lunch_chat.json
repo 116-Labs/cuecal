@@ -1,0 +1,21 @@
+{
+  "id": "neg-001-casual-lunch",
+  "category": "negatives",
+  "label": "not_invite",
+  "input": {
+    "text": "Anyone want to grab tacos down the street around noon?",
+    "received_at": "2026-10-01T11:15:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "dave@example.com",
+    "permalink": "https://slack.com/archives/C123/p1600000001",
+    "attachments": []
+  },
+  "expected": {
+    "label": "not_invite",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Casual lunch proposition, not a structured calendar invite",
+    "is_synthetic": true
+  }
+}

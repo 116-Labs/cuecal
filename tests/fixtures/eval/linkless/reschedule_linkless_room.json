@@ -1,0 +1,32 @@
+{
+  "id": "linkless-003-room-reschedule",
+  "category": "linkless",
+  "label": "reschedule",
+  "input": {
+    "text": "Moving our board review from Room 101 to Room 204 tomorrow at 4:00 PM EST.",
+    "received_at": "2026-10-04T11:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "exec@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "board review",
+      "start": "2026-10-05T16:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": null,
+      "meeting_id": null,
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Room-based meeting reschedule with relative date",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "id": "inv-002-google-meet",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Please join the Product Review sync.\n\nWhen: Monday Oct 19, 2026 2:00 PM - 2:30 PM (EDT)\nWhere: Google Meet (https://meet.google.com/xyz-uvwx-rst)\n\nAgenda: Review Q4 OKRs",
+    "received_at": "2026-10-02T12:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "bob@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Product Review sync",
+      "start": "2026-10-19T14:00:00-04:00",
+      "end": "2026-10-19T14:30:00-04:00",
+      "tz": "America/New_York",
+      "join_url": "https://meet.google.com/xyz-uvwx-rst",
+      "meeting_id": "xyz-uvwx-rst",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Standard Google Meet email invite",
+    "is_synthetic": true
+  }
+}

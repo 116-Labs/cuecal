@@ -1,0 +1,32 @@
+{
+  "id": "inv-004-cancel-invite",
+  "category": "invites",
+  "label": "cancel",
+  "input": {
+    "text": "The following meeting has been cancelled:\n\nTitle: Weekly 1:1 Sync\nOriginal Time: Oct 14, 2026 03:00 PM Pacific Time\nLocation: https://zoom.us/j/55443322110\n\nReason: Alice is out of office.",
+    "received_at": "2026-10-03T11:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "alice@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "cancel",
+    "candidate": {
+      "title": "Weekly 1:1 Sync",
+      "start": "2026-10-14T15:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/j/55443322110",
+      "meeting_id": "55443322110",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Meeting cancellation notification",
+    "is_synthetic": true
+  }
+}

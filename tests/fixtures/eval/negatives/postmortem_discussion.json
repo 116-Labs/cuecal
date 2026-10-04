@@ -1,0 +1,21 @@
+{
+  "id": "neg-005-postmortem",
+  "category": "negatives",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "In our postmortem meeting this morning, we identified the root cause of the gateway timeout. Action items are assigned in Linear.",
+    "received_at": "2026-10-02T15:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "lead@example.com",
+    "permalink": "https://slack.com/archives/C123/p1600000002",
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Discussion referring to a past meeting",
+    "is_synthetic": true
+  }
+}
