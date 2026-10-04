@@ -180,3 +180,37 @@ def get_counts_by_tier(conn: sqlite3.Connection) -> dict[str, int]:
     for name, cnt in rows:
         counts[name] = cnt or 0
     return counts
+
+
+def get_cursor(conn: sqlite3.Connection, source_name: str) -> str | None:
+    row = conn.execute(
+        "SELECT cursor FROM source_cursor WHERE source = ?", (source_name,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def set_cursor(conn: sqlite3.Connection, source_name: str, cursor: str) -> None:
+    conn.execute(
+        "INSERT INTO source_cursor (source, cursor) VALUES (?, ?) "
+        "ON CONFLICT(source) DO UPDATE SET cursor = excluded.cursor, "
+        "updated_at = CURRENT_TIMESTAMP",
+        (source_name, cursor),
+    )
+    conn.commit()
+
+
+def is_duplicate(conn: sqlite3.Connection, meeting_id: str, sink_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM event_link WHERE meeting_id = ? AND sink = ?", (meeting_id, sink_name)
+    ).fetchone()
+    return row is not None
+
+
+def record_event_link(
+    conn: sqlite3.Connection, meeting_id: str, sink_name: str, sink_event_id: str
+) -> None:
+    conn.execute(
+        "INSERT INTO event_link (meeting_id, sink, sink_event_id) VALUES (?, ?, ?)",
+        (meeting_id, sink_name, sink_event_id),
+    )
+    conn.commit()

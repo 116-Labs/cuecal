@@ -56,10 +56,65 @@ def cmd_run(args: argparse.Namespace) -> int:
         conn = db.connect(paths.db_path())
         run_id = db.record_run_start(conn)
         try:
-            # Future pipeline runs here; currently records successful run
+            cfg = load_config(paths.config_path())
+            sink_plugin = None
+            try:
+                sink_plugin = registry.get("sinks", cfg.sink)
+            except KeyError:
+                logger.warning("sink %r not found; skipping sink writes", cfg.sink)
+
+            from cuecal.extract import extract
+            import time
+
+            sources = []
+            for source_name in cfg.sources:
+                if source_name.startswith("mcp:") or source_name in ["zoho-mail", "zoho-cliq"]:
+                    name = source_name.split(":", 1)[1] if ":" in source_name else source_name
+                    from cuecal.sources.mcp import load_source
+
+                    sources.append(load_source(name))
+                else:
+                    cls = registry.get("sources", source_name)
+                    sources.append(cls())
+
+            while True:
+                for source in sources:
+                    cursor = db.get_cursor(conn, source.name)
+                    messages, next_cursor = source.fetch_since(cursor)
+
+                    for msg in messages:
+                        cand = extract(msg)
+                        if not cand:
+                            continue
+
+                        if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
+                            logger.info(
+                                "skipped duplicate meeting %r from %s", cand.meeting_id, msg.source
+                            )
+                            continue
+
+                        if cand.confidence >= cfg.auto_create_threshold:
+                            if args.dry_run:
+                                logger.info("dry-run: would create event for %r", cand.title)
+                            elif sink_plugin:
+                                event_id = sink_plugin.create_event(cand)
+                                if cand.meeting_id and event_id:
+                                    db.record_event_link(conn, cand.meeting_id, cfg.sink, event_id)
+                                logger.info("created event %r", event_id)
+
+                    if next_cursor and not args.dry_run:
+                        db.set_cursor(conn, source.name, next_cursor)
+
+                if args.once:
+                    break
+
+                logger.info("sleeping for %d seconds", cfg.poll_interval_seconds)
+                time.sleep(cfg.poll_interval_seconds)
+
             db.record_run_finish(conn, run_id, status="success")
             conn.close()
             return 0
+
         except Exception as exc:
             db.record_run_finish(conn, run_id, status="error", error=str(exc))
             conn.close()
@@ -102,7 +157,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok = False
         print(f"config: {exc}")
         cfg = None
-        
+
     if cfg:
         for source_name in cfg.sources:
             if source_name.startswith("mcp:") or source_name in ["zoho-mail", "zoho-cliq"]:
@@ -110,6 +165,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 name = source_name.split(":", 1)[1] if ":" in source_name else source_name
                 try:
                     from cuecal.sources.mcp import load_source
+
                     src = load_source(name)
                     try:
                         src.validate()
@@ -120,7 +176,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 except Exception as exc:
                     ok = False
                     print(f"source {source_name}: mapping load failed ({exc})")
-                    
+
     print(f"db path: {paths.db_path()}")
     try:
         print(f"keyring backend: {secrets.backend_name()}")

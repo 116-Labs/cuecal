@@ -149,3 +149,143 @@ def test_cli_run_lock_contention(tmp_path, capsys):
     assert cli.main(["run", "--once"]) == 0
 
     external_lock.release()
+
+def test_cli_run_orchestration(tmp_path, monkeypatch):
+    import sqlite3
+    
+    assert cli.main(["init"]) == 0
+    
+    # Mock extract
+    from cuecal.models import Message, MeetingCandidate
+    
+    class DummySource:
+        name = "dummy"
+        def fetch_since(self, cursor):
+            from datetime import datetime
+            msg = Message(id="msg1", source="dummy", sender="test", ts=datetime.now(), text="test text")
+            return [msg], "cursor_next"
+            
+    class DummySink:
+        name = "dummy-sink"
+        def create_event(self, candidate):
+            return "event1"
+            
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummySource
+        if kind == "sinks":
+            return DummySink()
+        raise KeyError(name)
+            
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+    
+    def fake_extract(msg):
+        return MeetingCandidate(confidence=0.9, meeting_id="mtg1", title="test", start=None, end=None)
+        
+    monkeypatch.setattr("cuecal.extract.extract", fake_extract)
+    
+    # We need to set the config source to dummy
+    conn = sqlite3.connect(tmp_path / "state.db")
+    
+    # Overwrite config to use dummy source
+    config_path = tmp_path / "config.toml"
+    with open(config_path, "r") as f:
+        content = f.read()
+    with open(config_path, "w") as f:
+        f.write(content.replace("sources = []", 'sources = ["dummy"]'))
+
+    assert cli.main(["run", "--once"]) == 0
+    
+    cur = conn.execute("SELECT cursor FROM source_cursor WHERE source = 'dummy'").fetchone()
+    assert cur is not None
+    assert cur[0] == "cursor_next"
+    
+    cur = conn.execute("SELECT sink_event_id FROM event_link WHERE meeting_id = 'mtg1'").fetchone()
+    assert cur is not None
+    assert cur[0] == "event1"
+
+
+def test_cli_run_dry_run_skips_writes(tmp_path, monkeypatch):
+    import sqlite3
+    assert cli.main(["init"]) == 0
+    
+    from cuecal.models import Message, MeetingCandidate
+    
+    class DummySource:
+        name = "dummy"
+        def fetch_since(self, cursor):
+            from datetime import datetime
+            msg = Message(id="msg1", source="dummy", sender="test", ts=datetime.now(), text="test text")
+            return [msg], "cursor_next"
+            
+    sink_calls = []
+    class DummySink:
+        name = "dummy-sink"
+        def create_event(self, candidate):
+            sink_calls.append(candidate)
+            return "event1"
+            
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummySource
+        if kind == "sinks":
+            return DummySink()
+        raise KeyError(name)
+            
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+    monkeypatch.setattr("cuecal.extract.extract", lambda msg: MeetingCandidate(confidence=0.9, meeting_id="mtg1", title="test", start=None, end=None))
+    
+    config_path = tmp_path / "config.toml"
+    with open(config_path, "r") as f:
+        content = f.read()
+    with open(config_path, "w") as f:
+        f.write(content.replace("sources = []", 'sources = ["dummy"]'))
+        
+    assert cli.main(["--dry-run", "run", "--once"]) == 0
+    
+    conn = sqlite3.connect(tmp_path / "state.db")
+    cur = conn.execute("SELECT cursor FROM source_cursor WHERE source = 'dummy'").fetchone()
+    assert cur is None  # cursor unchanged
+    assert not sink_calls
+
+
+def test_cli_run_daemon_loop(tmp_path, monkeypatch):
+    assert cli.main(["init"]) == 0
+    
+    class DummySource:
+        name = "dummy"
+        def fetch_since(self, cursor):
+            return [], None
+            
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummySource
+        if kind == "sinks":
+            class DummySink:
+                name = "dummy-sink"
+                def create_event(self, candidate):
+                    return "event1"
+            return DummySink()
+        raise KeyError(name)
+            
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+    
+    config_path = tmp_path / "config.toml"
+    with open(config_path, "r") as f:
+        content = f.read()
+    with open(config_path, "w") as f:
+        f.write(content.replace("sources = []", 'sources = ["dummy"]'))
+        
+    sleeps = []
+    def fake_sleep(secs):
+        sleeps.append(secs)
+        raise RuntimeError("stop daemon loop")
+        
+    import time
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+    
+    # RuntimeError is caught by cli.py try block and raised again
+    with pytest.raises(RuntimeError, match="stop daemon loop"):
+        cli.main(["run"])
+        
+    assert len(sleeps) == 1
