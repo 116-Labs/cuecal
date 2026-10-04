@@ -439,21 +439,21 @@ def test_auth_token_resolution(monkeypatch):
     monkeypatch.setattr(
         secrets,
         "get_secret",
-        lambda ref: (
-            json.dumps({"access_token": "json-access-token"}) if ref == "google" else None
-        ),
+        lambda ref: json.dumps({"access_token": "json-access-token"}) if ref == "google" else None,
     )
     source_json = GmailSource()
     assert source_json._get_token() == "json-access-token"
 
 
 def test_config_gmail_section_parsing():
-    cfg = parse_config({
-        "gmail": {
-            "query": "zoom.us OR meet.google.com",
-            "lookback_days": 14,
+    cfg = parse_config(
+        {
+            "gmail": {
+                "query": "zoom.us OR meet.google.com",
+                "lookback_days": 14,
+            }
         }
-    })
+    )
     assert cfg.gmail.query == "zoom.us OR meet.google.com"
     assert cfg.gmail.lookback_days == 14
 

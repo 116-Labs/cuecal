@@ -7,7 +7,7 @@ from cuecal.sources.mcp import MCPMapping, MCPSource
 def test_mcp_source_stdio():
     # Use the stub server
     stub_path = Path(__file__).parent / "stub_mcp_server.py"
-    
+
     mapping = MCPMapping(
         name="test-zoho-mail",
         transport="stdio",
@@ -22,24 +22,25 @@ def test_mcp_source_stdio():
             "sender": "from_address",
             "ts": "received_time",
             "text": "body_text",
-            "permalink": "web_url"
-        }
+            "permalink": "web_url",
+        },
     )
-    
+
     source = MCPSource("test-zoho-mail", mapping)
-    source.validate() # ensure it validates without error against the stub server
-    
+    source.validate()  # ensure it validates without error against the stub server
+
     messages, next_cursor = source.fetch_since(None)
-    
+
     assert len(messages) == 1
     assert messages[0].id == "123"
     assert messages[0].sender == "alice@example.com"
     assert messages[0].text == "Let's meet"
     assert next_cursor == "cur123"
 
+
 def test_mcp_source_stdio_cliq():
     stub_path = Path(__file__).parent / "stub_mcp_server.py"
-    
+
     mapping = MCPMapping(
         name="test-zoho-cliq",
         transport="stdio",
@@ -54,19 +55,21 @@ def test_mcp_source_stdio_cliq():
             "sender": "sender.email",
             "ts": "created_time",
             "text": "content",
-            "permalink": "message_url"
-        }
+            "permalink": "message_url",
+        },
     )
-    
+
     source = MCPSource("test-zoho-cliq", mapping)
     source.validate()
-    
+
     messages, next_cursor = source.fetch_since(None)
-    
+
     assert len(messages) == 1
     assert messages[0].id == "m1"
     assert messages[0].sender == "bob@example.com"
     assert messages[0].text == "zoom call?"
+
+
 def test_zoho_mail_mapping_contract():
     import pytest
 
