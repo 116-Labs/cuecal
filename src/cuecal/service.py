@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import plistlib
@@ -133,8 +134,13 @@ def get_service_status(
     *,
     conn: sqlite3.Connection | None = None,
     plist_path: Path | None = None,
+    secondary_sinks: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Retrieve full service status including launchd state and run statistics."""
+    """Retrieve full service status including launchd state and run statistics.
+
+    ``secondary_sinks`` (read from the config when omitted) decides which failed deliveries the
+    next run retries; a failure for a sink no longer listed there is marked ``retried: False``.
+    """
     target_plist = plist_path or paths.launchd_plist_path()
     installed = target_plist.exists()
     plist_info: dict[str, Any] = {}
@@ -143,6 +149,12 @@ def get_service_status(
             plist_info = plistlib.loads(target_plist.read_bytes())
         except Exception:
             pass
+
+    if secondary_sinks is None:
+        try:
+            secondary_sinks = load_config(paths.config_path()).secondary_sinks
+        except Exception:
+            secondary_sinks = None
 
     close_conn = False
     if conn is None:
@@ -161,6 +173,8 @@ def get_service_status(
         "local": 0,
         "paid": 0,
     }
+    sink_deliveries: dict[str, dict[str, int]] = {}
+    sink_failures: list[dict[str, Any]] = []
 
     if conn is not None:
         try:
@@ -168,9 +182,15 @@ def get_service_status(
             last_error = db.get_last_error(conn)
             counts_source = db.get_counts_by_source(conn)
             counts_tier = db.get_counts_by_tier(conn)
+            sink_deliveries = db.get_sink_delivery_counts(conn)
+            sink_failures = db.list_sink_deliveries(conn, statuses=("failed",))
         finally:
             if close_conn:
                 conn.close()
+
+    for item in sink_failures:
+        # None: config unreadable, so whether the next run retries this sink is unknown.
+        item["retried"] = None if secondary_sinks is None else item["sink"] in secondary_sinks
 
     return {
         "installed": installed,
@@ -183,6 +203,8 @@ def get_service_status(
         "last_error": last_error,
         "counts_by_source": counts_source,
         "counts_by_tier": counts_tier,
+        "sink_deliveries": sink_deliveries,
+        "sink_failures": sink_failures,
     }
 
 
@@ -233,5 +255,40 @@ def format_status(status: dict[str, Any]) -> str:
     tiers = status.get("counts_by_tier", {})
     for tier in ["regex", "deterministic", "local", "paid"]:
         lines.append(f"  {tier}: {tiers.get(tier, 0)}")
+
+    lines.append("")
+    lines.append("sink deliveries:")
+    deliveries = status.get("sink_deliveries", {})
+    if deliveries:
+        for sink, by_status in sorted(deliveries.items()):
+            parts = [f"{by_status.get(s, 0)} {s}" for s in db.SINK_DELIVERY_STATUSES]
+            lines.append(f"  {sink}: {', '.join(parts)}")
+    else:
+        lines.append("  (none)")
+
+    failures = status.get("sink_failures", [])
+    if failures:
+        lines.append("")
+        lines.append(f"failed sink deliveries ({len(failures)}):")
+        for item in failures:
+            title = ""
+            try:
+                title = json.loads(item.get("candidate_json") or "{}").get("title") or ""
+            except (ValueError, AttributeError):
+                pass
+            label = item.get("meeting_id") or f"delivery #{item['id']}"
+            lines.append(f"  [{item['sink']}] {label}" + (f" ({title})" if title else ""))
+            lines.append(
+                f"    attempts: {item.get('attempts', 0)}, "
+                f"last attempt: {item.get('last_attempt_at') or 'never'}"
+            )
+            lines.append(f"    error: {item.get('error_message') or 'unknown'}")
+            if item.get("retried") is False:
+                lines.append("    not retried: sink no longer configured in `secondary_sinks`")
+        if any(item.get("retried") is not False for item in failures):
+            lines.append(
+                "  fix the sink's credentials or config (`cuecal doctor`); "
+                "the next `cuecal run` retries each sink still listed in `secondary_sinks`"
+            )
 
     return "\n".join(lines)

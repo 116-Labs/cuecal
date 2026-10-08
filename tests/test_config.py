@@ -53,6 +53,28 @@ def test_empty_config_uses_defaults():
     assert cfg.gmail.latency_budget_seconds == 30.0
 
 
+def test_secondary_sinks_default_and_parse(tmp_path):
+    path = tmp_path / "config.toml"
+    write_default_config(path)
+    assert load_config(path).secondary_sinks == []
+    cfg = parse_config({"sink": "google-calendar", "secondary_sinks": ["zoho", "ics"]})
+    assert cfg.secondary_sinks == ["zoho", "ics"]
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("zoho", "list of non-empty strings"),
+        ([""], "list of non-empty strings"),
+        (["zoho", "zoho"], "must not repeat"),
+        (["google-calendar"], "must not include the primary"),
+    ],
+)
+def test_secondary_sinks_invalid(value, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_config({"secondary_sinks": value})
+
+
 def test_limits_config_parsing():
     cfg = parse_config(
         {

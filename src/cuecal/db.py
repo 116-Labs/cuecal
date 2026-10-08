@@ -79,7 +79,38 @@ MIGRATIONS: list[str] = [
         UNIQUE (source, message_id)
     );
     """,
+    """
+    CREATE TABLE sink_delivery (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id TEXT,
+        sink TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'secondary',
+        candidate_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        sink_event_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (meeting_id, sink)
+    );
+    """,
 ]
+
+SINK_DELIVERY_STATUSES = ("pending", "synced", "failed")
+_SINK_DELIVERY_COLUMNS = (
+    "id",
+    "meeting_id",
+    "sink",
+    "role",
+    "candidate_json",
+    "status",
+    "sink_event_id",
+    "attempts",
+    "last_attempt_at",
+    "error_message",
+    "created_at",
+)
 
 
 def schema_version(conn: sqlite3.Connection) -> int:
@@ -238,6 +269,97 @@ def record_event_link(
         (meeting_id, sink_name, sink_event_id),
     )
     conn.commit()
+
+
+def add_sink_delivery(
+    conn: sqlite3.Connection,
+    *,
+    sink: str,
+    candidate_json: str,
+    meeting_id: str | None = None,
+    role: str = "secondary",
+) -> int:
+    """Track a write to one sink. A known (meeting_id, sink) keeps its row and status."""
+    cursor = conn.execute(
+        """
+        INSERT INTO sink_delivery (meeting_id, sink, role, candidate_json)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(meeting_id, sink) DO UPDATE SET
+            role = excluded.role,
+            candidate_json = excluded.candidate_json
+        """,
+        (meeting_id, sink, role, candidate_json),
+    )
+    conn.commit()
+    if meeting_id is None:
+        return int(cursor.lastrowid)
+    row = conn.execute(
+        "SELECT id FROM sink_delivery WHERE meeting_id = ? AND sink = ?", (meeting_id, sink)
+    ).fetchone()
+    return int(row[0])
+
+
+def record_sink_attempt(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    *,
+    status: str,
+    sink_event_id: str | None = None,
+    error_message: str | None = None,
+    attempted_at: str | None = None,
+) -> None:
+    """Record one write attempt; a synced attempt clears the previous error."""
+    if status not in SINK_DELIVERY_STATUSES:
+        raise ValueError(f"unknown sink delivery status {status!r}")
+    now = attempted_at or datetime.now(UTC).isoformat()
+    conn.execute(
+        """
+        UPDATE sink_delivery SET
+            status = ?,
+            sink_event_id = COALESCE(?, sink_event_id),
+            attempts = attempts + 1,
+            last_attempt_at = ?,
+            error_message = ?
+        WHERE id = ?
+        """,
+        (status, sink_event_id, now, error_message, delivery_id),
+    )
+    conn.commit()
+
+
+def list_sink_deliveries(
+    conn: sqlite3.Connection,
+    *,
+    statuses: tuple[str, ...] | None = None,
+    sink: str | None = None,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if statuses is not None:
+        if not statuses:
+            return []
+        clauses.append(f"status IN ({', '.join('?' for _ in statuses)})")
+        params.extend(statuses)
+    if sink is not None:
+        clauses.append("sink = ?")
+        params.append(sink)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        f"SELECT {', '.join(_SINK_DELIVERY_COLUMNS)} FROM sink_delivery{where} ORDER BY id ASC",
+        params,
+    ).fetchall()
+    return [dict(zip(_SINK_DELIVERY_COLUMNS, r, strict=True)) for r in rows]
+
+
+def get_sink_delivery_counts(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """Return {sink: {status: count}} across every tracked delivery."""
+    counts: dict[str, dict[str, int]] = {}
+    rows = conn.execute(
+        "SELECT sink, status, COUNT(*) FROM sink_delivery GROUP BY sink, status"
+    ).fetchall()
+    for sink, status, cnt in rows:
+        counts.setdefault(sink, {})[status] = cnt
+    return counts
 
 
 def add_pending(

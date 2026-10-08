@@ -808,3 +808,132 @@ def test_cli_run_captures_dropped_near_miss(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_cli_run_fans_out_and_retries_failed_secondary(tmp_path, monkeypatch, capsys):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    calls = []
+    zoho_up = {"value": False}
+    fetched = {"done": False}
+
+    class DummySource:
+        name = "dummy"
+
+        def fetch_since(self, cursor):
+            if fetched["done"]:
+                return [], None
+            fetched["done"] = True
+            msg = Message(id="msg1", source="dummy", sender="t", ts=datetime.now(), text="x")
+            return [msg], "cursor_next"
+
+    class PrimarySink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            calls.append(("google-calendar", candidate.meeting_id))
+            return "gcal-evt"
+
+    class ZohoSink:
+        name = "zoho"
+
+        def create(self, candidate):
+            calls.append(("zoho", candidate.meeting_id))
+            if not zoho_up["value"]:
+                raise ConnectionError("zoho unreachable")
+            return "zoho-evt"
+
+    sinks = {"google-calendar": PrimarySink, "zoho": ZohoSink}
+
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummySource
+        if kind == "sinks" and name in sinks:
+            return sinks[name]
+        raise KeyError(name)
+
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda msg: MeetingCandidate(confidence=0.9, meeting_id="mtg1", title="Budget"),
+    )
+
+    config_path = tmp_path / "config.toml"
+    content = config_path.read_text()
+    content = content.replace("sources = []", 'sources = ["dummy"]')
+    content = content.replace("secondary_sinks = []", 'secondary_sinks = ["zoho"]')
+    config_path.write_text(content)
+
+    # First run: primary succeeds, secondary fails; the run itself still succeeds.
+    assert cli.main(["run", "--once"]) == 0
+    assert calls == [("google-calendar", "mtg1"), ("zoho", "mtg1")]
+
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "(success)" in out
+    assert "  [zoho] mtg1 (Budget)" in out
+    assert "error: ConnectionError: zoho unreachable" in out
+
+    # Next run retries the failed secondary without re-creating the primary event.
+    zoho_up["value"] = True
+    assert cli.main(["run", "--once"]) == 0
+    assert calls == [("google-calendar", "mtg1"), ("zoho", "mtg1"), ("zoho", "mtg1")]
+
+    conn = db.connect(tmp_path / "state.db")
+    rows = {r["sink"]: r for r in db.list_sink_deliveries(conn)}
+    assert rows["google-calendar"]["status"] == "synced"
+    assert rows["zoho"]["status"] == "synced"
+    assert rows["zoho"]["attempts"] == 2
+    assert db.is_duplicate(conn, "mtg1", "zoho")
+    conn.close()
+
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "failed sink deliveries" not in out
+    assert "  zoho: 0 pending, 1 synced, 0 failed" in out
+
+
+def test_cli_approve_fans_out_to_secondary(tmp_path, monkeypatch, capsys):
+    from cuecal.models import MeetingCandidate
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    created = []
+
+    class Sink:
+        def __init__(self, name):
+            self.name = name
+
+        def create(self, candidate):
+            created.append(self.name)
+            return f"{self.name}-evt"
+
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: Sink(name) if kind == "sinks" else None,
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text().replace("secondary_sinks = []", 'secondary_sinks = ["zoho"]')
+    )
+
+    conn = db.connect(tmp_path / "state.db")
+    pid = db.add_pending(
+        conn, candidate=MeetingCandidate(title="Plan", confidence=0.6, meeting_id="m9")
+    )
+    conn.close()
+
+    assert cli.main(["approve", str(pid)]) == 0
+    assert "approved #1: created event google-calendar-evt (Plan)" in capsys.readouterr().out
+    assert created == ["google-calendar", "zoho"]
+
+    conn = db.connect(tmp_path / "state.db")
+    rows = {r["sink"]: r["status"] for r in db.list_sink_deliveries(conn)}
+    assert rows == {"google-calendar": "synced", "zoho": "synced"}
+    conn.close()
+
+

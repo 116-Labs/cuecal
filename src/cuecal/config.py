@@ -14,6 +14,8 @@ DEFAULT_CONFIG_TOML = """\
 # CueCal configuration. Secrets live in the OS keyring; reference them by name below.
 sources = []
 sink = "google-calendar"
+# Extra sinks written after the primary `sink`; failed writes retry on later runs.
+secondary_sinks = []
 poll_interval_seconds = 300
 
 [llm]
@@ -32,6 +34,7 @@ pending = 0.5
 _TOP_KEYS = {
     "sources",
     "sink",
+    "secondary_sinks",
     "poll_interval_seconds",
     "llm",
     "thresholds",
@@ -70,6 +73,7 @@ class ConferenceConfig:
 class Config:
     sources: list[str] = field(default_factory=list)
     sink: str = "google-calendar"
+    secondary_sinks: list[str] = field(default_factory=list)
     poll_interval_seconds: int = 300
     llm_tiers: list[str] = field(default_factory=lambda: ["regex", "local", "paid"])
     auto_create_threshold: float = 0.85
@@ -109,6 +113,15 @@ def parse_config(data: dict[str, Any]) -> Config:
     if not isinstance(sink, str) or not sink:
         raise ConfigError("sink must be a non-empty string")
     cfg.sink = sink
+
+    secondary = data.get("secondary_sinks", cfg.secondary_sinks)
+    if not isinstance(secondary, list) or not all(isinstance(s, str) and s for s in secondary):
+        raise ConfigError("secondary_sinks must be a list of non-empty strings")
+    if len(set(secondary)) != len(secondary):
+        raise ConfigError("secondary_sinks must not repeat a sink")
+    if sink in secondary:
+        raise ConfigError(f"secondary_sinks must not include the primary sink {sink!r}")
+    cfg.secondary_sinks = list(secondary)
 
     poll = data.get("poll_interval_seconds", cfg.poll_interval_seconds)
     if isinstance(poll, bool) or not isinstance(poll, int) or poll < 1:

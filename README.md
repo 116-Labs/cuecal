@@ -71,6 +71,8 @@ Working today: `init`, `doctor`. Stubs until their issues land: `auth <provider>
 
 The config holds only keyring entry *names* under `[secrets]`. CueCal refuses to load a config that contains something that looks like a raw token.
 
+`sink` names the primary sink. `secondary_sinks` lists extra sinks that receive each event only after the primary write succeeds. A failed secondary write never undoes the primary event; it is recorded per sink in the state DB, shown with its error under `cuecal service status`, and retried automatically on the next run while the sink stays listed in `secondary_sinks`. Failures for a sink removed from that list are no longer retried and are marked as such in the status output.
+
 ## Plugins
 
 Sources, extractor providers and sinks register through Python entry points:

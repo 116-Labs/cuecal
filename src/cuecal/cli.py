@@ -12,8 +12,9 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from . import __version__, db, lock, log, notify, paths, registry, secrets, service
-from .config import ConfigError, load_config, write_default_config
+from .config import Config, ConfigError, load_config, write_default_config
 from .models import MeetingCandidate
+from .sinks import fanout
 
 logger = logging.getLogger("cuecal.cli")
 
@@ -21,6 +22,18 @@ logger = logging.getLogger("cuecal.cli")
 def _not_implemented(name: str) -> int:
     print(f"cuecal {name}: not implemented yet", file=sys.stderr)
     return 2
+
+
+def _secondary_sinks(cfg: Config) -> dict[str, object | None]:
+    """Resolve configured secondary sinks; an unregistered one maps to None and fails per write."""
+    resolved: dict[str, object | None] = {}
+    for name in cfg.secondary_sinks:
+        try:
+            resolved[name] = registry.get("sinks", name)
+        except KeyError:
+            logger.warning("secondary sink %r not found; its writes are recorded as failed", name)
+            resolved[name] = None
+    return resolved
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -70,6 +83,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             except KeyError:
                 logger.warning("sink %r not found; skipping sink writes", cfg.sink)
 
+            secondaries = _secondary_sinks(cfg)
             notifiers = notify.build_notifiers(cfg)
 
             sources = []
@@ -107,6 +121,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                         sources.append(cls())
 
             while True:
+                if secondaries and not args.dry_run:
+                    fanout.retry_failed(conn, secondaries)
+
                 for source in sources:
                     cursor = db.get_cursor(conn, source.name)
                     messages, next_cursor = source.fetch_since(cursor)
@@ -167,21 +184,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                             if args.dry_run:
                                 logger.info("dry-run: would create event for %r", cand.title)
                             elif sink_plugin:
-                                sink_inst = (
-                                    sink_plugin()
-                                    if isinstance(sink_plugin, type)
-                                    else sink_plugin
+                                event_id = fanout.deliver(
+                                    conn,
+                                    cand,
+                                    primary_name=cfg.sink,
+                                    primary=sink_plugin,
+                                    secondaries=secondaries,
                                 )
-                                event_id = None
-                                if hasattr(sink_inst, "create"):
-                                    res = sink_inst.create(cand)
-                                    event_id = res.id if hasattr(res, "id") else str(res)
-                                elif hasattr(sink_inst, "create_event"):
-                                    res = sink_inst.create_event(cand)
-                                    event_id = res.id if hasattr(res, "id") else str(res)
-
-                                if cand.meeting_id and event_id:
-                                    db.record_event_link(conn, cand.meeting_id, cfg.sink, event_id)
                                 logger.info("created event %r", event_id)
                         else:
                             reason = (
@@ -298,21 +307,18 @@ def cmd_approve(args: argparse.Namespace) -> int:
             print(f"error: sink {cfg.sink!r} not found", file=sys.stderr)
             return 1
 
-        sink_inst = sink_plugin() if isinstance(sink_plugin, type) else sink_plugin
-
-        event_id = None
-        if hasattr(sink_inst, "create"):
-            res = sink_inst.create(cand)
-            event_id = res.id if hasattr(res, "id") else str(res)
-        elif hasattr(sink_inst, "create_event"):
-            res = sink_inst.create_event(cand)
-            event_id = res.id if hasattr(res, "id") else str(res)
-        else:
+        sink_inst = fanout.instantiate(sink_plugin)
+        if not hasattr(sink_inst, "create") and not hasattr(sink_inst, "create_event"):
             print(f"error: sink {cfg.sink!r} has no create method", file=sys.stderr)
             return 1
 
-        if cand.meeting_id and event_id:
-            db.record_event_link(conn, cand.meeting_id, cfg.sink, event_id)
+        event_id = fanout.deliver(
+            conn,
+            cand,
+            primary_name=cfg.sink,
+            primary=sink_inst,
+            secondaries=_secondary_sinks(cfg),
+        )
 
         db.approve_pending(conn, args.id)
         print(f"approved #{args.id}: created event {event_id} ({cand.title})")
@@ -440,17 +446,18 @@ def cmd_edit(args: argparse.Namespace) -> int:
                 print(f"error: sink {cfg.sink!r} not found", file=sys.stderr)
                 return 1
 
-            sink_inst = sink_plugin() if isinstance(sink_plugin, type) else sink_plugin
-            event_id = None
-            if hasattr(sink_inst, "create"):
-                res = sink_inst.create(cand)
-                event_id = res.id if hasattr(res, "id") else str(res)
-            elif hasattr(sink_inst, "create_event"):
-                res = sink_inst.create_event(cand)
-                event_id = res.id if hasattr(res, "id") else str(res)
+            sink_inst = fanout.instantiate(sink_plugin)
+            if not hasattr(sink_inst, "create") and not hasattr(sink_inst, "create_event"):
+                print(f"error: sink {cfg.sink!r} has no create method", file=sys.stderr)
+                return 1
 
-            if cand.meeting_id and event_id:
-                db.record_event_link(conn, cand.meeting_id, cfg.sink, event_id)
+            event_id = fanout.deliver(
+                conn,
+                cand,
+                primary_name=cfg.sink,
+                primary=sink_inst,
+                secondaries=_secondary_sinks(cfg),
+            )
 
             db.approve_pending(conn, args.id)
             print(f"approved #{args.id}: created event {event_id} ({cand.title})")
