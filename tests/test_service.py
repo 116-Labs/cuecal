@@ -121,5 +121,69 @@ def test_service_status_installed_with_stats(tmp_path):
     assert "last error: 2026-10-03T12:10:02Z - Network timeout" in output
     assert "gmail: 3" in output
     assert "regex: 3" in output
+    assert "sink deliveries:\n  (none)" in output
+    assert "failed sink deliveries" not in output
 
+    conn.close()
+
+
+def test_service_status_surfaces_failed_sink_deliveries(tmp_path):
+    plist_path = tmp_path / "com.cuecal.agent.plist"
+    conn = db.connect(tmp_path / "state.db")
+    primary = db.add_sink_delivery(
+        conn,
+        sink="google-calendar",
+        candidate_json='{"title": "Budget Sync"}',
+        meeting_id="mtg1",
+        role="primary",
+    )
+    db.record_sink_attempt(conn, primary, status="synced", sink_event_id="evt1")
+    failed = db.add_sink_delivery(
+        conn, sink="zoho", candidate_json='{"title": "Budget Sync"}', meeting_id="mtg1"
+    )
+    db.record_sink_attempt(
+        conn,
+        failed,
+        status="failed",
+        error_message="HTTPError: 401 Unauthorized",
+        attempted_at="2026-10-07T09:00:00Z",
+    )
+
+    status = service.get_service_status(
+        conn=conn, plist_path=plist_path, secondary_sinks=["zoho"]
+    )
+    assert status["sink_deliveries"] == {
+        "google-calendar": {"synced": 1},
+        "zoho": {"failed": 1},
+    }
+    assert [(f["sink"], f["retried"]) for f in status["sink_failures"]] == [("zoho", True)]
+
+    output = service.format_status(status)
+    assert "  google-calendar: 0 pending, 1 synced, 0 failed" in output
+    assert "  zoho: 0 pending, 0 synced, 1 failed" in output
+    assert "failed sink deliveries (1):" in output
+    assert "  [zoho] mtg1 (Budget Sync)" in output
+    assert "    attempts: 1, last attempt: 2026-10-07T09:00:00Z" in output
+    assert "    error: HTTPError: 401 Unauthorized" in output
+    assert "not retried" not in output
+    assert "the next `cuecal run` retries each sink still listed in `secondary_sinks`" in output
+    conn.close()
+
+
+def test_service_status_marks_failures_for_unconfigured_sinks(tmp_path):
+    plist_path = tmp_path / "com.cuecal.agent.plist"
+    conn = db.connect(tmp_path / "state.db")
+    failed = db.add_sink_delivery(
+        conn, sink="zoho", candidate_json='{"title": "Budget Sync"}', meeting_id="mtg1"
+    )
+    db.record_sink_attempt(conn, failed, status="failed", error_message="HTTPError: 401")
+
+    # zoho was removed from secondary_sinks: no run retries it, so no retry is promised.
+    status = service.get_service_status(conn=conn, plist_path=plist_path, secondary_sinks=[])
+    assert [(f["sink"], f["retried"]) for f in status["sink_failures"]] == [("zoho", False)]
+
+    output = service.format_status(status)
+    assert "  [zoho] mtg1 (Budget Sync)" in output
+    assert "    not retried: sink no longer configured in `secondary_sinks`" in output
+    assert "retries each sink" not in output
     conn.close()

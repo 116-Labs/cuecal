@@ -21,6 +21,7 @@ def test_migrate_from_empty(tmp_path):
         "service_run",
         "service_stat",
         "near_miss",
+        "sink_delivery",
     } <= _tables(conn)
 
 
@@ -169,6 +170,52 @@ def test_pending_crud_helpers(tmp_path):
     assert db.approve_pending(conn, pid2) is True
     assert db.get_pending(conn, pid2)["status"] == "approved"
     assert db.list_pending(conn, status="pending") == []
+
+
+def test_sink_delivery_helpers(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    assert db.list_sink_deliveries(conn) == []
+    assert db.get_sink_delivery_counts(conn) == {}
+
+    did = db.add_sink_delivery(conn, sink="zoho", candidate_json="{}", meeting_id="m1")
+    row = db.list_sink_deliveries(conn)[0]
+    assert row["id"] == did
+    assert row["status"] == "pending"
+    assert row["role"] == "secondary"
+    assert row["attempts"] == 0
+    assert row["last_attempt_at"] is None
+
+    db.record_sink_attempt(
+        conn, did, status="failed", error_message="boom", attempted_at="2026-10-07T10:00:00Z"
+    )
+    row = db.list_sink_deliveries(conn, statuses=("failed",))[0]
+    assert row["attempts"] == 1
+    assert row["last_attempt_at"] == "2026-10-07T10:00:00Z"
+    assert row["error_message"] == "boom"
+
+    # Same (meeting_id, sink) keeps its row, status and attempt count.
+    again = db.add_sink_delivery(conn, sink="zoho", candidate_json='{"x": 1}', meeting_id="m1")
+    assert again == did
+    row = db.list_sink_deliveries(conn, sink="zoho")[0]
+    assert row["status"] == "failed"
+    assert row["candidate_json"] == '{"x": 1}'
+
+    db.record_sink_attempt(conn, did, status="synced", sink_event_id="evt1")
+    row = db.list_sink_deliveries(conn, sink="zoho")[0]
+    assert row["status"] == "synced"
+    assert row["sink_event_id"] == "evt1"
+    assert row["error_message"] is None
+    assert row["attempts"] == 2
+
+    db.add_sink_delivery(conn, sink="google-calendar", candidate_json="{}", role="primary")
+    assert db.get_sink_delivery_counts(conn) == {
+        "zoho": {"synced": 1},
+        "google-calendar": {"pending": 1},
+    }
+    assert db.list_sink_deliveries(conn, statuses=()) == []
+
+    with pytest.raises(ValueError, match="unknown sink delivery status"):
+        db.record_sink_attempt(conn, did, status="bogus")
 
 
 def test_near_miss_crud_helpers(tmp_path):
