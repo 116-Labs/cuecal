@@ -13,6 +13,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CUECAL_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("CUECAL_LOCK_PATH", str(tmp_path / "cuecal.lock"))
     monkeypatch.setattr(registry, "_registry", {kind: {} for kind in registry.KINDS})
+    monkeypatch.setattr("cuecal.notify.DesktopNotifier.send", lambda self, notification: None)
 
 
 def test_help_lists_subcommands(capsys):
