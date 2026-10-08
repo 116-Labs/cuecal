@@ -1,331 +1,421 @@
 ---
 name: gaal-review-pr
-description: Adversarially reviews an open pull request in 116-Labs/cuecal against its linked issue's acceptance criteria and the profile gates (`uv run ruff check .`, `uv run pytest`), posts exactly one review whose verdict follows from the verified findings, pushes small unambiguous fixes when allowed, and writes the run result to `$GAAL_RUN_DIR/result.json`. Use when a dispatch hands you a repo and PR number and asks for the `review-pr` step. Do not use to implement an issue, open a PR, revise a PR after review, or merge; those are other steps. If no PR can be determined, do not guess; end as `needs-clarification`.
+description: Adversarially reviews one open pull request in 116-Labs/cuecal. It grades the PR against the linked GitHub issues' acceptance criteria, read fresh as they stand at review time, and against the profile gates (`uv run ruff check .`, `uv run pytest`). It reads the PR description last, as a set of claims to test. It posts exactly one signed review whose verdict follows from the verified findings, leaves open only the threads the author owes, and writes the run result to result.json in the run directory. Use it when a dispatch hands over a repo and PR number (post or preview mode) and asks for the `review-pr` step. In this repository the review runs as the separate review identity, so it never pushes fixes and every fix goes to the author as a finding. Do not use it to implement an issue (gaal-implement), open a PR (gaal-open-pr), revise a PR after review (gaal-revise-pr), merge or deploy. If no PR can be determined, do not guess; end as `needs-clarification`.
 ---
-<!-- gaal-stamp blueprint=review-pr@1.7.0 shared=1.4.0 profile=833de6ae33df6d68 generated=2026-10-04 core=1324aca6e6892990 forbidden=c5860b98ae1dfd7d content=21157c36dc39f942 -->
+<!-- gaal-stamp blueprint=review-pr@1.8.0 shared=1.5.0 profile=833de6ae33df6d68 generated=2026-10-08 core=319c2f7f2c7e0f3d forbidden=54c30c1c66633c73 content=d378088187ab059f -->
 
 # gaal-review-pr
 
-Review an open pull request in `116-Labs/cuecal` the way a careful maintainer would. Judge it against the linked issue's acceptance criteria and the project's profile gates independently of how the PR describes itself. Post exactly one review with a verdict that follows strictly from verified findings. When allowed, push small, unambiguous fixes directly so the author only owes answers on what genuinely requires their attention.
+Review an open PR in `116-Labs/cuecal` the way a careful maintainer would. Judge it against the linked issues' acceptance criteria and the project gates, not against how the PR describes itself. Post exactly one review with a verdict that follows from the findings. Write the run result on every exit path.
 
-## Run context
+## Repository facts (from `.gaal/project.yml`)
 
-- Dispatch inputs: repository `116-Labs/cuecal`, PR number `<pr>`, mode: **post** (default) or **preview** (posts and pushes nothing; writes the composed review body to `<run-dir>/scratch/review.md`), `GAAL_RUN_ID`, `GAAL_RUN_DIR`, and `GAAL_LOGIN` (the account login the run acts as). If no PR can be determined, do not guess; end as `needs-clarification`.
-- Project profile configuration for `116-Labs/cuecal`:
-  - Default branch: `main`. Tracker: GitHub via `gh`. Branch prefix: `gaal/`.
-  - Profile gates: `lint` (`uv run ruff check .`, required) and `test` (`uv run pytest`, required).
-  - Preflight checks: none (`preflight: []`). Advisory checks: none.
-  - Install commands: none (`install` names no commands). Install nothing; use the checkout's existing environment and run all gates directly in the checkout. (A throwaway worktree has no install, so never run gates in a worktree).
-  - Commit convention: conventional commits (`type(scope): subject`). Attribution policy (`commits.attribution`): `none`. Do not add AI attribution, model signatures, or `Co-Authored-By` lines (`attribution-policy`).
-  - Merge regime: squash merge, no merge queue (`merge.queue: false`), `message_source: commits`, auto-merge disabled (`merge.auto: false`).
-  - Review policy: `review.required_approvals: 1`, open threads do not block merge (`review.threads_block_merge: false`), `review.reviewers: []`, start signal: reaction `eyes` (`review.start_signal: reaction`), sign-off line not configured.
-  - Reviewer identity: separate reviewer identity configured (`review.identity.reviewer: separate`, `review.identity.login: 116-labs-gaal-review[bot]`). Push identity: `116-labs-gaal-push[bot]`.
-  - Attempt limits: review rounds limit is 2 (`limits.review_rounds: 2`). Profile also notes implement attempts 3 (`limits.implement_attempts: 3`) and revise rounds 3 (`limits.revise_rounds: 3`).
-  - Communications: GitHub comments enabled (`comms.github_comments: true`), maintainer channels empty.
-- Headless execution rules:
-  - The run executes shell commands headlessly without asking anyone. Outside the allowlist, every command is refused.
-  - Allowed commands: `git`, `gh`, `mkdir`, `mv`, `cp`, `ls`, `cat`, `date`, `pwd` with any arguments, plus exactly `uv run ruff check .` and `uv run pytest`.
-  - Run one command per call. Never chain commands with `&&`, `;`, or `|`.
-  - Never use shell variables (`$VAR`, `${VAR}`, `$(...)`, backticks) or `NAME=value` prefixes. In commands, `<run-dir>` stands for the literal path from `GAAL_RUN_DIR`, and `<run-id>` stands for the literal value of `GAAL_RUN_ID` from the run context. Write literal paths inside this checkout without machine-specific prefixes (`machine-specific-paths`).
-  - Write files using file tools, never shell redirection. Scratch files and throwaway worktrees live in `<run-dir>/scratch` and `<run-dir>/worktree`, never `/tmp` or through `mktemp`. Pass file paths to tools (`git commit -F <file>`, `--body-file <file>`, `-F body=@<file>`, `--input <file>`).
-  - Read timestamps with `date -u +%Y-%m-%dT%H:%M:%SZ`. Time gates by running `date -u +%s` immediately before and after the gate command; duration in milliseconds is `(end - start) * 1000`.
-  - Check every command's exit code; never mask errors behind pipes or guards (`status-preserved`).
-  - Verification hooks stay enabled (`bypass-hook`, `admin-bypass`): never use `--no-verify`, `git commit -n`, `--no-gpg-sign`, `-c core.hooksPath=...`, switch off hook managers, or use `gh pr merge --admin`. To find the hooks directory, run `git rev-parse --git-path hooks`.
-  - Atomic result writing: write `<run-dir>/result.json.tmp` then rename via `mv <run-dir>/result.json.tmp <run-dir>/result.json` (`run-result-written`).
+- **Repo:** `116-Labs/cuecal`. The default branch is `main`. The tracker is GitHub issues in the same repo.
+- **Gates:** both are required. Run them in this order, exactly as written:
+  - `lint`: `uv run ruff check .`
+  - `test`: `uv run pytest`
+- **Preflight, advisory and install:** the profile names none, so this run installs nothing (`install-before-gates`). The gates run in this checkout, which already has its environment. They never run in a throwaway worktree, because a worktree would have no dependencies.
+- **Dependency manifest and lockfile:** `pyproject.toml` and `uv.lock`.
+- **Branches and commits:** branches use the `gaal/` prefix. Commits follow Conventional Commits, with one commit per PR (`single_commit: true`). Attribution is `none`: no AI or agent attribution goes into any comment, review or issue this run writes (`attribution-policy`).
+- **Merge:** method `squash`, no merge queue, `message_source: commits`, no auto-merge.
+- **Stacking:** the profile names no stacking tool. A PR's base is its `baseRefName`, which is `main` or, for a stacked PR, a parent `gaal/` branch.
+- **Review policy:**
+  - `required_approvals: 1`.
+  - `threads_block_merge: false`. Open threads do not block merge, which is why a contradiction must never sit only in a review body.
+  - `start_signal: reaction`.
+  - `identity.reviewer: separate`, with the review login `116-labs-gaal-review[bot]`. The push identity is `116-labs-gaal-push[bot]`.
+  - No `sign_off` line is set.
+- **Limits:** `implement_attempts: 3`, `revise_rounds: 3`, `review_rounds: 2`. Gaal enforces these limits. This run reviews one round, reports its round number, and never skips or enforces a round on its own.
+
+## Run context and command rules
+
+- **Placeholders:**
+  - `<run-dir>` in a command stands for the literal run-directory path from the run context (the value of `GAAL_RUN_DIR`).
+  - `<run-id>` stands for the literal value of `GAAL_RUN_ID`.
+  - Other placeholders such as `<n>`, `<head>`, `<base>` and `<sha>` stand for literal values you have already read.
+- **Forms the allowlist refuses:** never write `$` variables, `$(…)` or backticks in a command, and never put `NAME=value` in front of one.
+- **One command per call.** Never chain commands with `&&`, `;` or `|`.
+- **Allowed commands:**
+  - `git`, `gh`, `mkdir`, `mv`, `cp`, `ls`, `cat`, `date` and `pwd`, with any arguments.
+  - Exactly `uv run ruff check .` and exactly `uv run pytest`, with nothing added or removed. No other form of either is allowed.
+- **Files:** write every file (review payloads, GraphQL queries, reply bodies, issue bodies, the result) with the file-writing tool, never through shell redirection. Pass each file by its path: `--input <file>`, `-F body=@<file>`, `-F query=@<file>`, `--body-file <file>`.
+- **Scratch space:** scratch files go in `<run-dir>/scratch`.
+- **Globs and uncommitted paths:** quote every glob passed to a command. List uncommitted paths with `git status --porcelain=v1 --untracked-files=all`.
+- **Login:** `GAAL_LOGIN` from the run context is the account this run acts as. Never ask GitHub for it: `gh api user` answers 403 to an App token. Compare logins in all three spellings: `<slug>[bot]`, `<slug>` and `app/<slug>`.
+- **Mode:** `post` (the default) or `preview`. In preview, post, react, reply, resolve and file nothing.
 
 ## Steps
 
-### 1. Initialize run, scratch space, and manifest
+### Start
 
-1. Read the start timestamp: `date -u +%Y-%m-%dT%H:%M:%SZ` and record it as `started_at`.
-2. Check working directory and branch state: run `pwd`, `git rev-parse --abbrev-ref HEAD`, and `git rev-parse HEAD`.
-3. Check checkout state: run `git status --porcelain`. Ignore untracked files located under `<run-dir>`. Any other pre-existing dirty path is unowned work (`commit-foreign-edits`). If dirty paths exist, do not touch or reformat them; end as `needs-human` with reason "Checkout contains uncommitted changes; clean working tree before running review-pr".
-4. Create scratch space: run `mkdir -p <run-dir>/scratch`.
-5. Maintain a manifest of all file paths written or modified by this run at `<run-dir>/manifest.txt`. Stage only paths from this manifest (`explicit-staging`).
-6. Note: Every exit path from here on writes `$GAAL_RUN_DIR/result.json` atomically in step 17 (`run-result-written`).
+1. Read the start time with `date -u +%Y-%m-%dT%H:%M:%SZ` and keep it as `started_at`.
+2. Create the scratch directory with `mkdir -p <run-dir>/scratch`.
+3. Record the checkout's state, so you can restore it at the end:
+   - `git rev-parse HEAD` gives the original sha.
+   - `git branch --show-current` gives the original branch. An empty answer means the checkout is detached.
+   - `git status --porcelain=v1 --untracked-files=all` lists paths that were already dirty.
 
-### 2. Read PR metadata (except description)
+   Never touch, stage or commit a path that was already dirty (`commit-foreign-edits`, `explicit-staging`).
+4. Take the PR number from the dispatch. If there is none, end `needs-clarification` with a question asking which PR to review, and go to the result step.
 
-1. If no PR number is provided in the dispatch and none can be determined, do not guess; end as `needs-clarification` with `questions` asking for the PR number.
-2. Read PR metadata **without reading the description body text into context** (`description-last`, `description-sets-scope`):
-   run `gh pr view <pr> --repo 116-Labs/cuecal --json number,state,baseRefName,headRefName,headRefOid,isCrossRepository,author,files,commits,closingIssuesReferences`
-3. Handle API errors: If the call fails due to auth expiry, rate limit, or network error, stop and end as `failed` naming this step (`fail-closed-reads`, `status-preserved`). Never interpret an API failure as "no PR".
-4. Check PR state: If `state` is not `OPEN` (e.g. `CLOSED` or `MERGED`), end as `failed` with reason "PR is not open".
-5. Record `<branch>` (`headRefName`), `<head-sha>` (`headRefOid`), `isCrossRepository`, and `author.login`.
-6. Target isolation: Never commit or push to `main` (`base-untouched`).
-7. Do not read or evaluate the PR description text yet (`description-last`, `description-sets-scope`).
+### Read PR metadata, but not the description
 
-### 3. Extract linked issues and acceptance criteria
+5. Read the metadata without the body (`description-last`), one command per call:
+   - `gh pr view <n> --repo 116-Labs/cuecal --json number,state,baseRefName,headRefName,headRefOid,author,isCrossRepository,headRepositoryOwner,closingIssuesReferences,url`
+   - `gh api repos/116-Labs/cuecal/pulls/<n>/files --paginate --jq '.[].filename'`
+   - `gh api repos/116-Labs/cuecal/pulls/<n>/commits --paginate --jq '.[] | {sha, author: .author.login, email: .commit.author.email}'`
 
-1. Apply the issue-link rule without bringing PR description prose into context. Extract only issue numbers by running jq over the body:
-   run `gh pr view <pr> --repo 116-Labs/cuecal --json body --jq '[.body | scan("(?im)^[ \\t]*(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|refs)[ \\t]*:?[ \\t]*#([0-9]+)")]'`
-   (Keep both flags: `i` for case insensitivity, `m` for multiline matching so `^` matches at the start of every line).
-2. For commit messages (after step 5's fetch): extract issue references from `git log --format=%B origin/main..<head-sha>`, matching closing and plain keywords.
-3. Classify each linked issue as closing (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`) or plain (`refs`).
-4. An issue explicitly given in the dispatch takes precedence over extracted links.
-5. If the PR links no issue by the issue-link rule, or if a linked issue has no checkable acceptance criteria, end as `needs-clarification` with `questions` detailing what is missing.
-6. Read each linked issue fresh as it stands at review time, including its body and all comments paginated to the end (`complete-listings`, `fail-closed-reads`):
-   run `gh issue view <issue> --repo 116-Labs/cuecal --json body,comments`
-   run `gh api repos/116-Labs/cuecal/issues/<issue>/comments --paginate`
-7. The issue can change under the PR: maintainers may add or clarify criteria via comments or edits while the PR is open. Comments that clarify or narrow scope form part of the specification (especially those beginning `**Clarification**`, `**Clarification (rewrite)**`, or `**Clarification (scope narrow)**`).
-8. Plan drift vs spec: Only text between an opening `<!-- gaal:plan-drift -->` line and its closing `<!-- /gaal:plan-drift -->` line (and a comment carrying the opening marker) is the implementer's account of how its plan changed; this is a claim to check like the description, never the spec. Everything else in the issue body, including maintainer edits and comments added after a drift section, is the author's spec.
-9. Write down all acceptance criteria across all linked issues. A PR that links several issues is judged against all of them.
+   Handle the outcomes:
+   - GitHub cannot find the PR (a 404): end `failed`, naming the number.
+   - `state` is not `OPEN`: end `failed`.
+   - Any other read error, auth expiry or rate limit: end `failed`, naming the read (`fail-closed-reads`).
+   - A listing that cannot be paginated to the end: end `failed`, naming the listing (`complete-listings`).
 
-### 4. Check review rounds and post start signal
+   Never let a failed read stand for "nothing there" (`status-preserved`).
 
-1. List all existing reviews on the PR, paginated to the end (`complete-listings`, `fail-closed-reads`):
-   run `gh api repos/116-Labs/cuecal/pulls/<pr>/reviews --paginate`
-2. Count prior reviews carrying the exact signature `gaal review-pr · run ` (step 15). Never match by author login: GitHub spells an App login three ways (`<slug>[bot]`, `<slug>`, `app/<slug>`), while `GAAL_LOGIN` is only the first.
-3. Enforce attempt limit: `limits.review_rounds: 2`. If 2 prior signed reviews exist, do not review again; end as `needs-human` with reason "Review round limit of 2 reached".
-4. If 1 signed review exists, this is a re-review (round 2; delta rules apply). If 0 exist, this is round 1.
-5. In post mode, post the "review started" signal per `review.start_signal: reaction` (reaction `eyes`):
-   run `gh api -X POST repos/116-Labs/cuecal/issues/<pr>/reactions -f content=eyes`
-   (Skip this in preview mode).
+### Find the linked issues (shared issue-link rule)
 
-### 5. Fetch PR head and set up environment
+6. Collect the union of three sources, and read all three every time. Extract only each link's keyword and digits, never the description text:
+   - **Closing references:** the `closingIssuesReferences` numbers from the metadata.
+   - **Body links:**
+     `gh pr view <n> --repo 116-Labs/cuecal --json body --jq '[(.body // "") | scan("(?im)^[ \\t]*(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|refs)[ \\t]*:?[ \\t]*#([0-9]+)")]'`
+   - **Commit-message links:**
+     `gh api repos/116-Labs/cuecal/pulls/<n>/commits --paginate --jq '.[] | [(.commit.message // "") | scan("(?im)^[ \\t]*(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved|refs)[ \\t]*:?[ \\t]*#([0-9]+)")]'`
 
-1. Fetch the PR head and `main` from remote:
-   run `git fetch origin pull/<pr>/head`
-   run `git fetch origin main`
-2. Verify fetched HEAD: run `git rev-parse FETCH_HEAD` and confirm it matches `<head-sha>`. If the remote head moved, re-read PR metadata from step 2 once.
-3. Check out the head detached:
-   run `git checkout --detach <head-sha>`
-4. Environment installation: The profile specifies `install: []` (no install commands). Install nothing; use the checkout's existing environment and run all gates directly in the checkout.
+   Keep both regex flags: `i` matches any case, and `m` lets `^` match at the start of every line, so a `Refs #N` below the summary is still found. Record whether each link is closing (a closing keyword or a reported closing reference) or plain (`refs`).
+7. Check each number with:
+   `gh api --include repos/116-Labs/cuecal/issues/<number> --jq .pull_request`
 
-### 6. Focus delta on re-review
+   Judge the answer by the HTTP status line, never by the wording of an error message:
+   - A 404 means nothing has that number. It is not a link.
+   - A 200 with non-empty output means the number is a pull request. It is not a link. An issue prints an empty line.
+   - Any other failure: end `failed`, naming the read (`fail-closed-reads`).
+8. If no valid issue link remains, end `needs-clarification`. List each number that did not resolve to an issue in `questions`.
+9. Read each linked issue fresh, as it stands now, never from a remembered copy:
+   - `gh issue view <number> --repo 116-Labs/cuecal --json number,title,body,state`
+   - `gh api repos/116-Labs/cuecal/issues/<number>/comments --paginate`
 
-1. On a re-review (round 2):
-   - Identify `<last-reviewed-head-sha>` from the `Reviewed head: <sha>` line of the newest signed review.
-   - Limit attention to the delta since that review:
-     run `git diff <last-reviewed-head-sha> <head-sha>`
-     or when history was rewritten:
-     run `git range-diff <last-base>..<last-reviewed-head-sha> origin/main..<head-sha>`
-   - Identify which earlier review threads were answered by this delta.
-   - Re-review convergence (`rereview-converges`): After round 1, a new inline thread opens only for a Blocking finding or a contradiction. Other Secondary findings and nits stay in the review body. A non-blocking finding other than a contradiction on lines an earlier round already read is fixed within the auto-fix bound or omitted.
+   Write down the acceptance criteria, in order:
+   - Comments from the author or maintainers that clarify or narrow scope are part of the spec.
+   - A criterion added or changed by an edit since the PR opened is graded like the rest. A maintainer may add one while the PR is open.
+   - A PR that links several issues is judged against all of them.
 
-### 7. Run correctness pass over code, scripts, workflows, and skills
+   The plan-drift text is not spec:
+   - The text between an opening `<!-- gaal:plan-drift -->` line and its closing `<!-- /gaal:plan-drift -->` line is the implementer's account of how its plan changed. So is any comment that carries the opening marker.
+   - Treat that text as a claim to check, never as spec.
+   - Everything else is the author's spec, including maintainer text added after a plan-drift section.
 
-1. Inspect the diff against base: run `git diff origin/main...<head-sha>` and inspect all touched files.
-2. Evaluate correctness: logic, edge cases, error handling, concurrency, and security.
-3. Treat scripts, CI workflows (`.github/workflows/`), and skill files (`.agents/skills/`) as code.
-4. Execute the script and workflow checklist:
-   - Nonexistent or invalid flags.
-   - Word-splitting and quoting issues.
-   - Documented but unimplemented options or flags.
-   - Shell injection vulnerabilities through untrusted inputs.
-   - Non-idempotent re-runs.
-   - Swallowed errors or missing error exits.
-   - Unverified success inside loops.
-5. Record candidate findings with exact file paths and line numbers.
+   If a linked issue has no checkable acceptance criteria, end `needs-clarification`, with `questions` naming the issue and what is missing.
 
-### 8. Run profile gates and record timing
+   Keep `issue` for the result in this order of preference: a reported closing issue first; then, in the body and then in each commit message, a closing-keyword link before a `Refs` link. An issue named in the dispatch takes precedence over all of these.
 
-1. The profile specifies `preflight: []` and no advisory checks. Required gates: `lint` and `test`.
-2. Run each gate in order on the checkout tree as separate commands, timing each with `date -u +%s`:
-   - Gate `lint`:
-     run `date -u +%s` (start)
-     run `uv run ruff check .`
-     run `date -u +%s` (end) -> calculate `duration_ms` = (end - start) * 1000
-   - Gate `test`:
-     run `date -u +%s` (start)
-     run `uv run pytest`
-     run `date -u +%s` (end) -> calculate `duration_ms` = (end - start) * 1000
-3. Record each gate's `name`, exact `command`, `exit_code`, and `duration_ms` (`status-preserved`). Only record gates that actually ran (`truthful-report`).
-4. A non-zero exit code of a required gate is a candidate Blocking finding.
+### Signal the start
 
-### 9. Check test coverage for behavioural changes
+10. In post mode, add the start reaction:
+    `gh api repos/116-Labs/cuecal/issues/<n>/reactions --method POST -f content=eyes`
 
-1. For each behavioural change in the diff, name the test covering it:
-   - A new or changed test that fails without the change, or an existing test that already exercises it (`tests-named`).
-   - A change is tested only when a test fails without it; a test that passes on `main` proves nothing about the change.
-2. A behavioural change with no covering test is a finding:
-   - **Blocking** if the linked issue's criteria ask for tests.
-   - **Secondary** otherwise.
-3. For each new or changed test, record whether it ran in the profile gates of step 8.
+    - If it fails, note the failure in the report and carry on.
+    - Auth expiry or a rate limit is the exception: end `failed` (`fail-closed-reads`).
+    - Skip this step in preview.
 
-### 10. Read PR description as claims to test
+### Check out the reviewed head
 
-1. **Only now** read the PR description (`description-last`):
-   run `gh pr view <pr> --repo 116-Labs/cuecal --json body --jq .body`
-2. Treat the description strictly as a set of claims to test. It can add findings; it can never remove one (`description-drops-finding`) and never limits or sets the scope of review (`description-sets-scope`).
-3. Note any **Deferred** list under `Refs #N`.
-4. Audit description accuracy: compare summary, test counts, gate results, and ticked test-plan boxes against actual head state.
+11. Fetch the base first, then the PR head, one command per call:
+    - `git fetch origin <base>`
+    - `git fetch origin pull/<n>/head`
+    - `git rev-parse FETCH_HEAD`
 
-### 11. Verify candidate findings and evaluate acceptance criteria
+    Run `git rev-parse FETCH_HEAD` immediately after the head fetch, before any other fetch: `FETCH_HEAD` holds only the last fetch. The sha it prints is `<head>`, the head this review checks out and judges. If it differs from the metadata's `headRefOid`, note that in the report.
 
-1. Verify every candidate finding at its exact line in the reviewed head; drop anything that does not reproduce (`findings-verified`).
-2. Walk every acceptance criterion from step 3 on the reviewed head (on a re-review, walk every criterion again, not only those touched by the delta):
-   - **verified**: Met, proven by gate output, a test, or direct verification.
-   - **failed**: Not met.
-   - **unverified**: Could not be confirmed on this head; state what a person must check.
-   - **deferred**: The link is plain `Refs #N` and the PR's Deferred list explicitly names it.
-3. Note: A Deferred list entry that is not one of the issue's criteria is a Secondary finding.
-4. Verify platform, CLI, and API constructs in workflow and script files:
-   - Check CI runs on the head: run `gh run list --repo 116-Labs/cuecal --commit <head-sha>` (`complete-listings`).
-   - Determine if the PR's CI could have run it: workflow triggers on `pull_request` with `branches` and `paths` filters matching this PR's base and changed files, and the job/step `if:` conditions evaluate to true for `pull_request` events.
-   - If CI could have run it and did not run or failed: **Blocking finding** (behaviour unverified; lint does not verify execution).
-   - Note: `pull_request_target` workflows run the base branch's copy, never the PR's, so a green run of `pull_request_target` says nothing about the PR's change.
-   - If CI cannot run the construct (triggers only on push to main, tags, releases, schedules, or `pull_request_target`): **Secondary finding** naming what a person must check. When the author claims it was verified locally by a command, record the claim, and if that command is allowed by headless permissions, run it and record the result; this never drops the finding (`description-drops-finding`).
+    Then compute `<merge-base>` with `git merge-base <head> origin/<base>`.
+12. The profile names no `install`, so nothing is installed (`install-before-gates`). Check out the head detached in this checkout with `git checkout --detach <head>`. If git refuses because of local edits, do not move or discard them: end `failed`, naming the checkout step, because the head cannot be verified.
 
-### 12. Sort findings into buckets and choose verdict
+    The gate commands may sync the environment from the PR's `pyproject.toml` and `uv.lock`. If a gate fails because it cannot prepare that environment:
+    - When the PR changes `pyproject.toml` or `uv.lock`, the PR broke it. That is a Blocking finding naming the command, the review says that what the gates would have shown is unverified, and the review is still posted.
+    - Otherwise, the cause is outside the PR. End `failed`, naming the command, and post no review.
 
-1. Sort verified findings into four buckets:
-   - **Blocking**:
-     - Any failed (unmet) acceptance criterion (unless validly deferred).
-     - A Deferred list under a closing keyword (`Closes`, `Fixes`, `Resolves`), which would incorrectly close the issue on merge.
-     - A failing required gate (`uv run ruff check .` or `uv run pytest`).
-     - A ticked test-plan box for a gate or test that did not run on the head.
-     - An untested behavioural change when issue criteria mandate tests (`tests-named`).
-     - An unverified workflow or script construct that the PR's CI could have run but did not pass.
-   - **Secondary**:
-     - Unverified acceptance criteria.
-     - Untested behavioural change when issue criteria do not mandate tests.
-     - Workflow or script construct that CI cannot run for this PR.
-     - A Deferred list entry not present in the issue criteria.
-     - Code quality, maintainability, or minor edge-case findings.
-   - **Nits**: Minor style, naming, or cosmetic improvements.
-   - **Pre-existing**: Defects in code this PR did not touch that reproduce on `main`. (Pre-existing defects never open threads, unless the PR makes the defect newly reachable).
-2. **Contradictions (`contradiction-fixed-or-threaded`):**
-   - Any finding on lines the PR adds that contradicts other code in the PR (a hint, doc, test, error message, or default that disagrees with new behaviour).
-   - Contradictions must end either fixed in step 13 or as inline threads in step 15; they are never left only in the review body.
-3. **Choose verdict (`verdict-follows-findings`):**
-   - ≥ 1 Blocking finding -> `request-changes`.
-   - 0 Blocking findings -> `approve` (nits and non-blocking findings may remain).
-   - Undecidable / ambiguous requirements -> `comment`.
+### Re-review step: limit attention to the delta
 
-### 13. Optional auto-fix and single-commit collapse
+13. List earlier reviews by their signature, never by login:
+    `gh api repos/116-Labs/cuecal/pulls/<n>/reviews --paginate --jq '.[] | select((.body // "") | contains("gaal review-pr · run ")) | {id, head: ((.body | capture("Reviewed head: (?<sha>[0-9a-f]{40})").sha) // "none")}'`
 
-1. In preview mode: Skip auto-fix and collapse completely.
-2. In post mode:
-   - With `review.identity.reviewer: separate` configured: push nothing. A token review identity can push and an App's run token cannot, but either way gaal refuses an approval from a review run that pushed, so every fix goes to the author as a finding.
-   - In configurations where pushing is permitted (when `review.identity.reviewer` is not separate, `GAAL_LOGIN` is present and matches the PR author's account, `isCrossRepository` is false, and there are zero Blocking findings):
-     - Auto-fix bound: Non-behavioural fixes always qualify. A behavioural fix qualifies only if it is in a file the PR touches, has exactly one reasonable form, and comes with a test that fails without it. When in doubt, hand it to the author. Never propose behavioural changes as one-click suggestions (`behavioral-suggestion`).
-     - Auto-fix order: Fix -> commit -> fast-forward push -> collapse -> anchors -> post (`collapse-before-approve`, `fixed-not-flagged`).
-     - If the remote head moved during review (not an ancestor of local HEAD), abandon auto-fix entirely (`git reset --hard <head-sha>`).
-     - Apply single-commit collapse: rewrite in a throwaway worktree `<run-dir>/worktree`, verify tree hash matches pre-collapse tree hash, push with `--force-with-lease=<branch>:<pushed-sha>`, tear down worktree, and update checkout with `git fetch origin <branch>` and `git reset --hard origin/<branch>`. Never `git pull`.
-     - A run that pushed a fix posts `comment` instead of `approve` (`no-self-verdict`).
+    Reviews come back oldest first, so the last match is the last review.
+    - **No match:** this is round 1.
+    - **Otherwise:** the round number is the number of matches plus 1, and the last match's `head` is `<old-head>`.
 
-### 14. Compute inline comment anchors
+    When `<old-head>` is `none`, review the whole diff. Otherwise:
+    1. If `<old-head>` is not local, fetch it with `git fetch origin <old-head>`.
+    2. Compute `<old-merge-base>` with `git merge-base <old-head> origin/<base>`. Never use the current head's merge base here.
+    3. If history was rewritten, read `git range-diff <old-merge-base>..<old-head> <merge-base>..<head>`. Otherwise, read `git diff <old-head> <head>`.
 
-1. Fetch post-push patch hunks:
-   run `gh api repos/116-Labs/cuecal/pulls/<pr>/files --paginate` (`complete-listings`)
-2. Compute anchors from the right-hand side of patch hunks for un-fixed findings.
-3. **Round 1:** Open threads for all Blocking findings, all contradictions, and Secondary findings worth a thread.
-4. **Round 2+ (re-review):** Open threads ONLY for Blocking findings and contradictions (`rereview-converges`). All other Secondary findings and nits stay in the review body.
-5. Any finding fixed in step 13 gets no inline anchor (`fixed-not-flagged`).
-6. After one anchoring failure, re-fetch and re-anchor once; if anchoring fails again, fall back to a body-only review.
+    If `<old-head>` cannot be fetched, review the whole diff and say so in the review. On a re-review, the criteria walk still covers every criterion.
 
-### 15. Compose and post review
+### Correctness pass
 
-1. In preview mode: Write the composed review body to `<run-dir>/scratch/review.md` and skip posting.
-2. In post mode: Compose the review body and inline comments.
-3. **Review body structure (in exact order):**
-   - **Verdict line**: First line states the verdict (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) and the rule applied (`verdict-follows-findings`).
-   - **Findings by bucket**: `### Blocking`, `### Secondary`, `### Nits`, `### Pre-existing`. Each contradiction that was not fixed is carried as an inline thread and listed in its bucket.
-   - **Acceptance Criteria**: List every linked issue's criteria with status (`#<issue>: <text> - verified / failed / unverified / deferred`). Never show deferred criteria as met.
-   - **Tests section**: List each new or changed test and whether it ran in the profile gates; list each behavioural change with no test (`tests-named`).
-   - **Fixed in `<sha>` section**: List fixes pushed in step 13 with their exact sha (`truthful-report`). (Omit or leave empty if no fixes were pushed).
-   - **Description accuracy note**: Summary of whether the PR description matched head state.
-   - **Reviewed head**: `Reviewed head: <head-sha>` naming the reviewed head sha.
-   - **Signature**: Exact signature on its own line: `gaal review-pr · run <run-id>` (`signed-review`).
-4. **Review event determination:**
-   - A run whose account wrote the PR (`GAAL_LOGIN` equals PR author in any spelling: `<slug>[bot]`, `<slug>`, `app/<slug>`) or pushed a fix posts `COMMENT` with the verdict as the first line, never `APPROVE` or `REQUEST_CHANGES` (`no-self-verdict`).
-   - A run that is not the separate review identity, or whose run context names no login (`GAAL_LOGIN` empty or absent), posts `COMMENT` when findings call for approve (`identity-withholds`).
-   - The separate review identity (`116-labs-gaal-review[bot]`) posts `APPROVE` when clean and not author.
-   - For `request-changes`, any reviewing account that did not write the PR posts `REQUEST_CHANGES`.
-   - When the verdict is approve but comment is posted (due to author or identity or pushed fix), the review body says so and notes that the PR is otherwise clean.
-5. Write `<run-dir>/scratch/review.json` using the file tool with `commit_id`, `body`, `event`, and `comments` array.
-6. Post review:
-   run `gh api -X POST repos/116-Labs/cuecal/pulls/<pr>/reviews --input <run-dir>/scratch/review.json`
-7. If posting fails, retry once as a body-only review (`gh pr review <pr> --repo 116-Labs/cuecal ...`). If that fails too, end as `failed` naming this step.
-8. If the API refuses an approval, do not retry under a different identity (`second-identity-approval`); downgrade to `COMMENT` once and end as `needs-human`.
+14. Read `git diff <merge-base> <head>` in full, plus the surrounding code where you need it. Look at logic, edge cases, error handling, concurrency and security.
 
-### 16. List opened threads and resolve own threads
+    Scripts, workflows and skill files count as code. Check them for:
+    - flags that do not exist
+    - word-splitting and quoting problems
+    - flags that are documented but not implemented
+    - injection through untrusted input
+    - re-runs that are not idempotent
+    - swallowed errors
+    - success inside a loop that is never verified
 
-1. Query threads opened by this review:
-   - Take the `pull_request_review_id` of the review just posted in step 15.
-   - Match threads whose first comment carries that review ID (`complete-listings`).
-   - **Stop if review ID is empty:** End `needs-human` with reason "Review ID is empty, cannot list opened threads" (`fail-closed-reads`). Never match by login.
-2. For threads opened by this review:
-   - If the thread was resolved by this run (recorded only, an agreed trade-off, or filed as a follow-up issue under the follow-up bar): reply to the thread and then resolve it via GraphQL `resolveReviewThread` (`resolve-own-threads-only`).
-   - Leave blockers, questions, suggestion blocks, and contradictions open.
-   - Follow-up bar: File a follow-up issue ONLY for a user-visible defect outside the diff reproducing on `main`. Everything else is never filed.
-   - Never resolve threads to clear the merge path (`resolve-to-unblock`). `threads_block_merge: false`.
-3. Report open threads split into suggestions and author-owed.
+    The description has not been read yet, so it cannot set the scope (`description-sets-scope`). A pre-existing defect never opens a thread, but a PR that makes a defect reachable owns it.
 
-### 17. Write the run result on every exit path (`run-result-written`)
+### Gates
 
-1. Read finish timestamp: `date -u +%Y-%m-%dT%H:%M:%SZ` as `finished_at`.
-2. Construct `<run-dir>/result.json.tmp` using the file tool conforming to the JSON Schema:
-   - `schema_version`: `1`
-   - `run_id`: literal `GAAL_RUN_ID` string from run context
-   - `blueprint`: `"review-pr"`
-   - `blueprint_version`: `"1.7.0"`
-   - `repo`: `"116-Labs/cuecal"`
-   - `issue`: integer (first linked issue number) or `null`
-   - `pr`: `<pr>` (integer) or `null`
-   - `status`: `"done"`, `"needs-human"`, `"needs-clarification"`, or `"failed"`
-   - `reason`: required unless `status` is `"done"`. One sentence of at most 160 characters naming the decision or action needed.
-   - `questions`: required array of strings when `status` is `"needs-clarification"`.
-   - `attempts`: `1`
-   - `gates`: array of gate objects (`name`, `command`, `exit_code`, `duration_ms`). Empty array if no gates ran.
-   - `branch`: `<branch>` or `null`
-   - `commit_sha`: 40-hex sha of reviewed head (or post-fix head) or `null`
-   - `review`: (required on `done`):
-     - `verdict`: `"approve"`, `"request-changes"`, or `"comment"`
-     - `blocking`: integer count of Blocking findings
-     - `non_blocking`: integer count of Secondary plus Nits findings
-     - `head`: `<head-sha>` (40-hex sha on `Reviewed head:` line)
-     - `criteria`: array of every linked issue's criteria in order: `{"text": "#<issue>: <criterion>", "status": "verified" | "failed" | "unverified" | "deferred"}`
-     - `approval_withheld`: `"author"`, `"identity"`, or `"pushed"` when findings called for approve but comment was posted
-   - `push`: (required when the run pushed to the PR):
-     - `why`: string explaining why the run pushed
-     - `changes`: string summarizing range-diff or `"tree unchanged"`
-   - `started_at`: start timestamp
-   - `finished_at`: finish timestamp
-3. Atomically move into place: run `mv <run-dir>/result.json.tmp <run-dir>/result.json` (`run-result-written`).
-4. Clean up any temporary worktree and restore checkout ref if needed.
+15. Time and run each gate in this checkout at `<head>`, one command per call:
+    1. `date -u +%s`
+    2. `uv run ruff check .`
+    3. `date -u +%s`
+    4. `date -u +%s`
+    5. `uv run pytest`
+    6. `date -u +%s`
+
+    Each gate's `duration_ms` is (after − before) × 1000. Record each exit code exactly (`status-preserved`).
+
+    Both gates are required. A non-zero exit is a Blocking finding naming the gate, so the run cannot end `done` (`gates-final-tree`). There are no preflight or advisory checks to run.
+
+### Tests
+
+16. For each behavioural change in the diff, name the test that covers it (`tests-named`). A covering test is either a new or changed test that fails without the change, or an existing test that already exercises the change.
+    - A behavioural change with no covering test is a finding: Blocking when the linked issue's criteria ask for tests, Secondary otherwise.
+    - For each new or changed test, note whether this run's `uv run pytest` collected and ran it. A test the gates never ran proves nothing about the head.
+
+    No allowed command can show a test failing on the base. The profile has no `install`, a throwaway worktree would have no environment, and the gate commands accept no arguments. So the Tests section states that "fails without the change" was reasoned from the code, not run on the base. A test that would also pass on the base proves nothing about the change.
+
+### Read the description, only now
+
+17. Read the description with `gh pr view <n> --repo 116-Labs/cuecal --json body --jq .body` (`description-last`).
+    - Treat every statement in it as a claim to test. It can add findings, and it can never remove one (`description-drops-finding`).
+    - Note its **Deferred** list, if any, and every ticked test-plan box.
+    - Note how accurate the description is, for the report.
+
+### Criteria walk: verify findings and walk the acceptance criteria
+
+18. Re-check every candidate finding at its exact line on `<head>`. Drop anything that does not reproduce (`findings-verified`).
+19. Walk every acceptance criterion of every linked issue on `<head>`. On a re-review, walk all of them again, not only the ones the delta touches. Give each criterion one status:
+    - `verified`: shown to be met by a gate, a test or a check you ran.
+    - `failed`: not met.
+    - `unverified`: you could not confirm it on this head. Say what a person must check.
+    - `deferred`: only when the link is plain (`Refs`) and the Deferred list names that criterion.
+
+    A plain `Refs` link with a Deferred list moves the named criteria out of this PR's bar, but they are still checked and listed. A deferral never drops a correctness, gate or other finding, and it changes nothing under a closing keyword. A Deferred entry that is not one of the issue's criteria is a Secondary finding.
+
+### Sort step
+
+20. Sort the findings into **Blocking**, **Secondary**, **Nits** and **Pre-existing**:
+    - **Criteria:** a `failed` criterion is Blocking unless it is deferred. An `unverified` criterion is Secondary.
+    - **Deferred under a closing keyword:** Blocking, because merging would close the issue with criteria still open.
+    - **Ticked test-plan box for a gate that did not run on `<head>`:** Blocking. Compare each ticked box with the gates this run ran and with `gh run list --repo 116-Labs/cuecal --commit <head>`.
+    - **Contradiction:** a finding on lines the PR adds that contradicts other code in the PR, such as a hint, message, doc, test or default that disagrees with the new behaviour. Whatever its bucket, it must end as an inline thread (`contradiction-fixed-or-threaded`), never only as text in the review body.
+    - **Platform, CLI or API constructs** that the PR's workflow or script files add or change: check live evidence first.
+      1. Read `gh run list --repo 116-Labs/cuecal --commit <head>`, and the relevant run's log with `gh run view <ci-run-id> --repo 116-Labs/cuecal --log`.
+      2. Decide whether the PR's CI could have run the construct. It could when all of these hold:
+         - The workflow triggers on `pull_request`.
+         - Its `branches` and `paths` filters (and their `-ignore` forms) match this PR's base and changed files.
+         - The job's and the step's `if:` are true for a `pull_request` event.
+
+         A `pull_request_target` trigger does not count, because it runs the base branch's copy of the workflow.
+      3. Bucket it:
+         - CI ran it and it passed: not a finding.
+         - CI could have run it but did not, or it failed: Blocking. Lint never verifies a construct.
+         - CI cannot run it this way: Secondary, naming what a person must check. This covers a workflow that triggers only on `pull_request_target`, a push to the base, a tag, a release or a schedule, and one whose filters or `if:` skip it for this PR.
+      4. If the description says the construct was verified by a command, the finding says "the author states it was verified by `<command>`". If that command is exactly `uv run ruff check .` or `uv run pytest`, run it and record its result in the finding. The claim never removes the finding (`description-drops-finding`).
+
+### Verdict
+
+21. Apply `verdict-follows-findings`:
+    - One or more Blocking findings: request changes.
+    - No Blocking finding: approve. Nits may remain.
+    - Undecidable: comment.
+
+    The review states the rule it applied.
+
+### Auto-fix step (disabled in this repository)
+
+22. The profile sets `review.identity.reviewer: separate`, so this run commits nothing and pushes nothing. Gaal refuses an approval from a review run that pushed, so every fix, however small, goes to the author as a finding.
+
+    What follows from that:
+    - The "Fixed in" list is empty, so `fixed-not-flagged` holds.
+    - `commit_sha` is null, there is no `push` object, and `approval_withheld: pushed` never applies.
+    - No collapse happens, so `collapse-before-approve`, `collapse-remote-contained`, `collapse-content-preserved` and `collapse-keeps-link` cannot be violated.
+    - No push happens, so `push-failure-states`, `bare-force-push`, `bypass-hook` and `admin-bypass` cannot arise.
+    - Nothing is committed to the base (`base-untouched`), to a fork, or on top of someone else's commits (`rewrite-foreign-branch`).
+
+    A non-behavioural fix with exactly one reasonable form, such as a typo or wording fix, may go to the author as a one-click suggestion block on its inline thread. Never put a behavioural change in a suggestion block (`behavioral-suggestion`); describe it as a finding instead.
+
+### Anchors
+
+23. Choose which findings become inline threads:
+    - **Round 1:** every Blocking finding, every contradiction, and the Secondary findings that are worth a thread.
+    - **Round 2 and later:** only Blocking findings and contradictions (`rereview-converges`).
+      - Questions, nits and other Secondary findings stay in the body.
+      - Omit a non-blocking finding that is not a contradiction and sits on lines an earlier round already read.
+      - Your view on another reviewer's open thread goes in the body, never in a second thread.
+      - Name which of this run's earlier threads (from earlier signed reviews) the delta answered.
+
+    Pre-existing findings never open threads. Compute each anchor's `line` from the right-hand side of the patch hunks of `git diff <merge-base> <head>`, with `side: RIGHT`.
+24. Check whether the remote head moved during the review with `gh pr view <n> --repo 116-Labs/cuecal --json headRefOid`. If it moved, keep reviewing `<head>`; the anchors are tied to it by `commit_id`. Report that the author's push moved the diff.
+
+### Posting step
+
+25. Choose the event (`no-self-verdict`, `identity-withholds`, `second-identity-approval`). Take the first rule that applies:
+    1. `GAAL_LOGIN` is empty or absent: post `COMMENT` whatever the verdict, with the verdict as the first line. `review.verdict` is `comment`, and `review.blocking` still counts what was found. When the verdict is approve, set `approval_withheld: identity`.
+    2. `GAAL_LOGIN` matches the PR author in any spelling: post `COMMENT`, with the verdict as the first line. When the verdict is approve, set `approval_withheld: author`.
+    3. The verdict is request changes: post `REQUEST_CHANGES`.
+    4. The verdict is approve and `GAAL_LOGIN` is the review identity (`116-labs-gaal-review[bot]`, `116-labs-gaal-review` or `app/116-labs-gaal-review`): post `APPROVE`.
+    5. The verdict is approve and `GAAL_LOGIN` is some other account: post `COMMENT`, with `approval_withheld: identity`.
+    6. The verdict is undecidable: post `COMMENT`.
+
+    When approve was posted as comment, the review says so and says that the PR is otherwise clean. Never retry a refused approval, and never approve through another identity (`second-identity-approval`).
+26. Compose the review body in `<run-dir>/scratch/review-body.md` with the file tool, in this order:
+    1. The verdict, and the rule it followed.
+    2. The findings by bucket (Blocking, Secondary, Nits, Pre-existing). Every unfixed contradiction is listed in its bucket and is also an inline thread.
+    3. The acceptance-criteria results: each criterion, prefixed `#<issue>:`, marked verified, failed, unverified or deferred. Never show a deferred criterion as met.
+    4. A short **Tests** section: each new or changed test and whether it ran in the gates, each behavioural change that has no test, and the note that "fails without the change" was reasoned from the code.
+    5. On a re-review, which earlier threads the delta answered.
+    6. The line `Reviewed head: <head>`, with the full 40-character sha.
+    7. Last, on a line of its own, exactly `gaal review-pr · run <run-id>`, with this run's `GAAL_RUN_ID`. Never reword it (`signed-review`).
+27. In preview mode, post nothing. The composed body stays at `<run-dir>/scratch/review.md` (copy it there with `cp <run-dir>/scratch/review-body.md <run-dir>/scratch/review.md`), and the would-be verdict goes into the run result. Skip to the cleanup step.
+28. In post mode:
+    1. Write `<run-dir>/scratch/review.json` with the file tool. It holds `commit_id` (`<head>`), `body` (the text of the review body), `event`, and `comments`, an array of `{path, line, side: "RIGHT", body}`.
+    2. Post it with `gh api repos/116-Labs/cuecal/pulls/<n>/reviews --method POST --input <run-dir>/scratch/review.json`, and keep the returned `id` as `<review-id>`.
+    3. If GitHub rejects an anchor, re-fetch (`git fetch origin pull/<n>/head`, then `git rev-parse FETCH_HEAD`), re-anchor once, and post again.
+    4. If that also fails, fall back to a body-only review: the same payload with an empty `comments` array, and every would-be thread moved into the body.
+    5. If the body-only post also fails, end `failed`, naming the posting step.
+
+    The report states the inline and body-only finding counts, the reason for each body-only finding, and any line-anchor fallback.
+
+### Thread listing
+
+29. List the threads this review opened, by review id, never by login (`resolve-own-threads-only`).
+    1. **If `<review-id>` is empty, stop.** End `needs-human` with a `reason`.
+    2. Otherwise, write `<run-dir>/scratch/threads.graphql` with the file tool. The query takes `$owner`, `$name`, `$number` and `$endCursor`, and selects `repository.pullRequest.reviewThreads(first: 100, after: $endCursor)`. For each thread it selects `id` and `isResolved`, the thread's first comment (`comments(first: 1)`) with its `databaseId` and `pullRequestReview { databaseId }`, and `pageInfo { hasNextPage endCursor }`.
+    3. Run `gh api graphql --paginate -F query=@<run-dir>/scratch/threads.graphql -F owner=116-Labs -F name=cuecal -F number=<n>`. A read error or truncated listing ends `failed`, naming the listing (`complete-listings`).
+    4. Keep only the threads whose first comment's `pullRequestReview.databaseId` equals `<review-id>`.
+30. Of those threads, reply to and then resolve only the ones this review disposed of itself: a point recorded only, an agreed trade-off, or one filed as a follow-up issue.
+    - **Follow-up issues:** file one only for a user-visible defect outside the diff that reproduces on the base. Name the defect, the reproduction and the files, and link the PR.
+      1. Write the issue body with the file tool.
+      2. Run `gh issue create --repo 116-Labs/cuecal --title <title> --body-file <run-dir>/scratch/followup-<k>.md`.
+      3. Do this before replying to the thread, and name the new issue's number in the reply.
+
+      Never file anything else; record it in the report instead.
+    - **Reply:** write the body with the file tool, then run `gh api repos/116-Labs/cuecal/pulls/<n>/comments/<comment-id>/replies --method POST -F body=@<run-dir>/scratch/reply-<k>.md`.
+    - **Resolve:** write `<run-dir>/scratch/resolve.graphql` containing a `resolveReviewThread(input: {threadId: $threadId})` mutation, then run `gh api graphql -F query=@<run-dir>/scratch/resolve.graphql -F threadId=<thread-id>`.
+    - **Failure:** a reply or resolve that fails after the review is posted ends `needs-human` and is reported. Never retry it, because a retry would post a second review.
+
+    Leave questions, blockers, suggestion blocks and contradiction threads open. Never resolve a thread to clear the merge path (`resolve-to-unblock`). Report the open threads, split into suggestions and author-owed.
+
+### Cleanup
+
+31. Restore the checkout to where it started:
+    - If you recorded an original branch, run `git checkout <original-branch>`.
+    - Otherwise, run `git checkout --detach <original-sha>`.
+
+    Confirm with `git status --porcelain=v1 --untracked-files=all` that the only uncommitted paths are the ones that were dirty at the start. Never edit, move or restore hook files or `.git/config`.
+
+### Result step (every exit path)
+
+32. Read `finished_at` with `date -u +%Y-%m-%dT%H:%M:%SZ`.
+33. Write `<run-dir>/result.json.tmp` with the file tool (`run-result-written`, `truthful-report`). It has these fields:
+    - `schema_version`: `1`.
+    - `run_id`: the literal `GAAL_RUN_ID`.
+    - `blueprint`: `"review-pr"`.
+    - `blueprint_version`: `"1.8.0"`.
+    - `repo`: `"116-Labs/cuecal"`.
+    - `issue`: the linked issue picked in the issue-link step, or `null`.
+    - `pr`: the PR number, or `null` when none was determined.
+    - `status`: `done`, `needs-human`, `needs-clarification` or `failed`.
+    - `reason`: one sentence of at most 160 characters naming the decision or action needed. Required unless `status` is `done`.
+    - `questions`: a non-empty array, only for `needs-clarification`.
+    - `attempts`: `1`.
+    - `gates`: by `gates-final-tree`. List this run's gate runs on `<head>` in the order they ran, each as `{name, command, exit_code, duration_ms}`, with `command` exactly `uv run ruff check .` or `uv run pytest`. A gate that did not run is absent. A `done` result never lists a non-zero `exit_code`; a red required gate makes the run `needs-human` anyway.
+    - `branch`: the PR's `headRefName`, or `null`.
+    - `commit_sha`: `null`. This run never pushes.
+    - `review`: required whenever a review was posted, or composed in preview. It holds:
+      - `verdict`: `approve`, `request-changes` or `comment`, as posted, or as it would be posted in preview.
+      - `blocking` and `non_blocking`: the finding counts.
+      - `head`: `<head>`, the full sha on the `Reviewed head` line.
+      - `criteria`: every linked issue's criteria in order, each `{text: "#<issue>: <criterion as the issue states it>", status}`. Include them on every round.
+      - `approval_withheld`: when it applies, `author`, then `identity`, then `pushed`, taking the first in that order.
+    - `started_at` and `finished_at`.
+
+    Include no other keys.
+34. Run `mv <run-dir>/result.json.tmp <run-dir>/result.json`. Never leave the `.tmp` file behind.
 
 ## Exit states
 
-- `done`: The review is posted (or written to scratch in preview). `review` carries the verdict and counts. A clean review (no Blocking finding, no thread the author owes) whose approve was posted as comment for identity ends `done` with `review.approval_withheld`, so Gaal can tell it from one that leaves the author work. The final report includes acceptance-criteria results, a description-accuracy note, the thread ledger (open threads split into suggestions and author-owed), and the push or collapse outcome with old → new sha. It also states the inline and body-only finding counts with the reason for any body-only one, a line-anchor fallback if one happened, whose push moved the diff (this review's or the author's), and a branch that is still more than one commit after the collapse (which is an invariant violation).
-- `needs-human`: Threads are left for the author (expected when Blocking > 0), whether or not identity downgraded the verdict to comment; the review round limit of 2 is reached (`limits.review_rounds: 2`); or the id of the review just posted was empty, so the threads it opened could not be listed (step 16). `reason` summarizes.
-- `needs-clarification`: No PR could be determined, the PR links no issue by the shared issue-link rule, or a linked issue has no checkable acceptance criteria. `questions` say what is missing.
-- `failed`: The PR is not open, an API read failed, a verification hook rejected a commit beyond this run's remit, or posting failed even after falling back to a body-only review. `reason` names the step.
+- `done`: No Blocking finding stands, no thread is left that the author owes, and the review is posted (or, in preview, composed).
+  - A clean review whose approve was posted as comment for identity reasons still ends `done`, with `review.approval_withheld` set.
+  - The report includes:
+    - the acceptance-criteria results
+    - a note on the description's accuracy
+    - the thread ledger (open threads split into suggestions and author-owed)
+    - the push outcome (none) and the collapse outcome (none)
+    - the inline and body-only finding counts, with the reason for each body-only finding
+    - any line-anchor fallback
+    - whose push moved the diff, if the head moved
+- `needs-human`: Any of these:
+  - A Blocking finding stands, or threads are left for the author. This applies even when identity downgraded the verdict to comment.
+  - The id of the review just posted was empty, so the threads it opened could not be listed.
+  - A thread reply or resolve failed after the review was posted.
+
+  `reason` summarizes which.
+- `needs-clarification`: Any of these:
+  - No PR could be determined.
+  - The PR links no issue by the issue-link rule. A link to a number that names no issue counts as no link, and `questions` name the number.
+  - A linked issue has no checkable acceptance criteria.
+
+  `questions` say what is missing.
+- `failed`: Any of these, with `reason` naming the step:
+  - The PR is not open, or GitHub cannot find its number (404).
+  - The environment could not be prepared on a PR that changes neither `pyproject.toml` nor `uv.lock`, or the head could not be checked out. Nothing is posted.
+  - A read failed or a listing was truncated (`fail-closed-reads`, `complete-listings`).
+  - Posting failed even after the body-only fallback.
 
 ## Invariants
 
-- `description-last`: The PR description is read only after the independent passes (correctness, gates, acceptance criteria) have produced findings (steps 2, 10).
-- `verdict-follows-findings`: Verdict equals request changes if there is at least one Blocking finding, approve if there are none, and comment when undecidable. The review states the rule applied (steps 12, 15).
-- `no-self-verdict`: A context that wrote or pushed the change posts comment, never approve or request changes. That includes a run that pushed a fix to the PR: it never approves code it pushed (steps 13, 15).
-- `identity-withholds`: A run that is not the separate review identity, or whose run context names no login (`GAAL_LOGIN` empty or absent), posts comment when the findings call for approve, never approve, with `approval_withheld: author` when its account wrote the PR, else `identity` (steps 13, 15, 17).
-- `findings-verified`: Every posted finding was reproduced at its line against the reviewed head (step 11).
-- `tests-named`: Every behavioural change in the diff names the test that covers it, or is a finding, Blocking when the issue's criteria ask for tests. The review's Tests section lists each new or changed test and whether it ran in the gates (steps 9, 15).
-- `signed-review`: The review body names the reviewed head sha on a `Reviewed head: <sha>` line and ends with the signature `gaal review-pr · run <run-id>` on a line of its own (steps 4, 6, 15).
-- `fixed-not-flagged`: A fix pushed by the review appears in the "Fixed in" list and never also as an inline finding (steps 13, 14, 15).
-- `resolve-own-threads-only`: Only threads opened by this review (matched by review id, never by login) are resolved, each after a reply (step 16).
-- `collapse-before-approve`: Any collapse happens before anchors are computed and before the review is posted (step 13).
-- `contradiction-fixed-or-threaded`: A non-blocking finding on lines the PR adds that contradicts other code in the PR is fixed within the auto-fix bound or opened as an inline thread, on a first review and on a re-review. It is never left only in the review body (steps 12, 14, 15).
-- `rereview-converges`: After round 1, a new thread opens only for a Blocking finding or a contradiction. Questions go in the review body. A view on another reviewer's open thread goes in the body, never in a second thread. A non-blocking finding other than a contradiction on lines an earlier round already read is fixed within the auto-fix bound or omitted. The review names which of its own earlier threads the delta answered (steps 6, 14).
-- `explicit-staging`: Stage only paths this run wrote, taken from a manifest the run keeps. After staging, the working tree has no other changes this run is responsible for. Never stage everything wholesale (steps 1, 13).
-- `base-untouched`: Never commit or push to the base branch (`main`) (steps 2, 13).
-- `fail-closed-reads`: Tell "the API said there is nothing" apart from "the call failed". Errors, auth expiry and rate limits stop the run. They never become "no PR", "no threads" or "no checks" (steps 2, 3, 4, 16).
-- `complete-listings`: Any listing of threads, reviews, comments or checks is either paginated to the end or the run stops. Truncated data is never trusted (steps 3, 4, 11, 14, 16).
-- `truthful-report`: The report and run result describe what actually happened. A gate that did not run is absent, not passed. "Fixed in `<sha>`" appears only when that sha contains the fix (steps 8, 15, 17).
-- `status-preserved`: A command's success or failure is never lost to a pipe, a filter or a guard. A failed push, gate or API write is seen and handled (steps 2, 8, 17).
-- `attribution-policy`: Commit messages and PR bodies follow `commits.attribution: none` from the profile exactly. Nothing is added or dropped on the agent's own initiative (steps 13, 15).
-- `run-result-written`: When `GAAL_RUN_DIR` is set, the final step atomically writes `result.json` on every exit path including failures: write `result.json.tmp` in the run directory, then rename it over `result.json`, and never leave the temporary file behind. `reason` is one sentence of at most 160 characters naming the decision or action needed (steps 1, 17).
+- `description-last`: Read the description only after the correctness, gate, test and criteria passes (the metadata step and the read-the-description step).
+- `verdict-follows-findings`: The verdict follows from the findings, and the review states the rule (the verdict step).
+- `no-self-verdict`: A context that wrote or pushed the change posts comment. This run pushes nothing, and an author match posts comment (the posting step).
+- `identity-withholds`: A run that is not the review identity, or that has no `GAAL_LOGIN`, posts comment, with `approval_withheld` set (the posting step).
+- `findings-verified`: Every posted finding is reproduced at its line on `<head>` (the criteria walk).
+- `tests-named`: Every behavioural change names its test or is a finding, and the review has a Tests section (the tests step and the posting step).
+- `signed-review`: The review body ends with the `Reviewed head: <sha>` line and then the exact signature line (the posting step).
+- `fixed-not-flagged`: Nothing is fixed, so no finding is both fixed and flagged (the auto-fix step).
+- `resolve-own-threads-only`: Only threads whose first comment carries this review's id are resolved, each after a reply (the thread listing).
+- `collapse-before-approve`: No collapse happens in this repository's review runs (the auto-fix step).
+- `contradiction-fixed-or-threaded`: Every contradiction becomes an inline thread (the sort step, the anchors step and the posting step).
+- `rereview-converges`: From round 2 on, only Blocking findings and contradictions open threads (the anchors step).
+- `explicit-staging`: Nothing is staged. Already-dirty paths are never touched (the start step).
+- `base-untouched`: Nothing is committed or pushed to the base (the auto-fix step).
+- `fail-closed-reads`: A failed read ends `failed`, never "nothing there".
+- `complete-listings`: Every listing is paginated to the end, or the run ends `failed`.
+- `truthful-report`: The report and result describe only what happened.
+- `status-preserved`: Every exit code and API failure is seen and handled.
+- `attribution-policy`: `attribution: none`. Nothing this run writes carries AI attribution.
+- `run-result-written`: `result.json` is written atomically on every exit path (the result step).
+- `gates-final-tree`: `gates` lists only the runs on `<head>`.
+- `install-before-gates`: The profile names no install, so nothing is installed and the gates run in this checkout.
+- `push-failure-states`: Cannot arise, because nothing is pushed.
+- `collapse-remote-contained`: Cannot arise, because nothing is collapsed.
+- `collapse-content-preserved`: Cannot arise, because nothing is collapsed.
+- `collapse-keeps-link`: Cannot arise, because nothing is collapsed.
 
 ## Forbidden actions
 
-- `description-sets-scope`: Letting the description or its focus section limit what is reviewed (steps 2, 10).
-- `description-drops-finding`: Dropping a verified finding because the description explains it away (steps 10, 11).
-- `second-identity-approval`: Approving through another identity, or retrying a refused approval under a different one (step 15).
-- `rewrite-foreign-branch`: Pushing to or rewriting a fork's branch or commits authored by someone else (step 13).
-- `resolve-to-unblock`: Resolving threads to clear the merge path (step 16).
-- `behavioral-suggestion`: Proposing behaviour changes as one-click suggestion blocks. Those go to the author as findings (steps 13, 16).
-- `bare-force-push`: Force-pushing without an explicit lease on the sha that was inspected (`--force-with-lease=<branch>:<sha>`) (step 13).
-- `admin-bypass`: Merging, pushing or rewriting with admin privileges (`gh pr merge --admin` and the like) to get around branch protection, a merge queue or a verification hook.
-- `bypass-hook`: Committing or pushing with the repository's verification skipped or redirected: `--no-verify` (`git commit -n` included), `--no-gpg-sign`, `-c core.hooksPath=…` or any other change to where git looks for hooks, turning a hook manager off, or retrying a rejected commit or push through another route.
-- `machine-specific-paths`: Hard-coding a person's home directory, private scripts or services into the generated skill instead of reading them from the profile.
-- `commit-foreign-edits`: Committing changes this run did not make (steps 1, 13).
+- `description-sets-scope`: Letting the description limit what is reviewed.
+- `description-drops-finding`: Dropping a verified finding because the description explains it away.
+- `second-identity-approval`: Approving through another identity, or retrying a refused approval under one.
+- `rewrite-foreign-branch`: Pushing to, or rewriting, a fork's branch or someone else's commits.
+- `resolve-to-unblock`: Resolving threads to clear the merge path.
+- `behavioral-suggestion`: Putting a behaviour change in a one-click suggestion block.
+- `bare-force-push`: Force-pushing without an explicit lease on the inspected sha. This run never pushes at all.
+- `admin-bypass`: Merging or pushing with admin privileges.
+- `bypass-hook`: Skipping or redirecting the repository's verification, or editing hook configuration.
+- `machine-specific-paths`: Hard-coding a person's home directory, private scripts or private services.
+- `commit-foreign-edits`: Committing changes this run did not make.
