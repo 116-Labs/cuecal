@@ -145,6 +145,35 @@ def test_mirror_rejects_target_as_source(mirror):
 
 
 @pytest.mark.parametrize(
+    "data",
+    [
+        {"mirror": {"target_calendar": "team@group"}},
+        {"mirror": {"target_calendar": "me@example.com"}},
+        {
+            "sink": "other",
+            "secondary_sinks": ["google-calendar"],
+            "mirror": {"target_calendar": "x"},
+        },
+    ],
+)
+def test_mirror_target_must_match_google_sink_calendar(data):
+    with pytest.raises(ConfigError, match="must be the primary calendar"):
+        parse_config(data)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"mirror": {"target_calendar": "primary"}},
+        {"mirror": {"target_calendar": "Me@Example.com", "self_email": "me@example.com"}},
+        {"sink": "other", "mirror": {"target_calendar": "team@group"}},
+    ],
+)
+def test_mirror_target_accepts_the_google_sink_calendar(data):
+    assert parse_config(data).mirror.target_calendar == data["mirror"]["target_calendar"]
+
+
+@pytest.mark.parametrize(
     "data, message",
     [
         ({"mirror": {"source_calendars": "work"}}, "mirror.source_calendars"),
