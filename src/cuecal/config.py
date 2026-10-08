@@ -38,7 +38,9 @@ _TOP_KEYS = {
     "secrets",
     "gmail",
     "limits",
+    "conference",
 }
+_PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
 
@@ -56,6 +58,14 @@ class GmailConfig:
 
 
 @dataclass
+class ConferenceConfig:
+    # provision_for = "off" disables both provisioning and replacement.
+    preferred: str = "google_meet"
+    replace: list[str] = field(default_factory=list)
+    provision_for: str = "off"
+
+
+@dataclass
 class Config:
     sources: list[str] = field(default_factory=list)
     sink: str = "google-calendar"
@@ -67,6 +77,7 @@ class Config:
     gmail: GmailConfig = field(default_factory=GmailConfig)
     fetch_limit: int = 100
     latency_budget_seconds: float = 30.0
+    conference: ConferenceConfig = field(default_factory=ConferenceConfig)
 
 
 def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
@@ -168,6 +179,20 @@ def parse_config(data: dict[str, Any]) -> Config:
     ):
         raise ConfigError("limits.latency_budget_seconds must be a positive number")
     cfg.latency_budget_seconds = float(latency_budget)
+
+    conf = _table(data, "conference", {"preferred", "replace", "provision_for"})
+    preferred = conf.get("preferred", cfg.conference.preferred)
+    if not isinstance(preferred, str) or not preferred:
+        raise ConfigError("conference.preferred must be a non-empty string")
+    replace = conf.get("replace", cfg.conference.replace)
+    if not isinstance(replace, list) or not all(isinstance(r, str) for r in replace):
+        raise ConfigError("conference.replace must be a list of strings")
+    provision_for = conf.get("provision_for", cfg.conference.provision_for)
+    if provision_for not in _PROVISION_MODES:
+        raise ConfigError(f"conference.provision_for must be one of {list(_PROVISION_MODES)}")
+    cfg.conference = ConferenceConfig(
+        preferred=preferred, replace=list(replace), provision_for=provision_for
+    )
 
     return cfg
 

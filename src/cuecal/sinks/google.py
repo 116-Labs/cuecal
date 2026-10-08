@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -14,6 +16,15 @@ from typing import Any
 from dateutil import parser as dateparser
 
 from cuecal import secrets
+from cuecal.conference import (
+    ConferencePlan,
+    _provider_for_uri,
+    event_conference_uris,
+    meet_join_url,
+    normalize_meet_code,
+    plan_conference,
+)
+from cuecal.config import ConferenceConfig
 from cuecal.models import MeetingCandidate
 from cuecal.sinks.base import SinkEvent
 
@@ -73,6 +84,14 @@ def parse_calendar_event(data: dict[str, Any]) -> SinkEvent:
     )
 
 
+def _meet_code(event: dict[str, Any]) -> str | None:
+    for uri in event_conference_uris(event):
+        code = normalize_meet_code(uri)
+        if code:
+            return code
+    return None
+
+
 class GoogleCalendarSink:
     """Google Calendar native sink adapter implementing the Sink protocol."""
 
@@ -86,7 +105,11 @@ class GoogleCalendarSink:
         secret_ref: str | None = None,
         dry_run: bool = False,
         http_client: Any = None,
+        conference_poll_attempts: int = 3,
+        conference_poll_delay: float = 1.0,
     ) -> None:
+        self.conference_poll_attempts = conference_poll_attempts
+        self.conference_poll_delay = conference_poll_delay
         self.token_provider = token_provider
         self.calendar_id = calendar_id
         self.secret_ref = secret_ref
@@ -345,6 +368,79 @@ class GoogleCalendarSink:
             body=body,
         )
         return parse_calendar_event(resp)
+
+    def provision_conference(
+        self, event_id: str, conf: ConferenceConfig
+    ) -> ConferencePlan:
+        """Add a Google Meet link to an event, or replace a configured provider's link.
+
+        Returns the decided plan. Under ``dry_run`` the plan is logged and nothing is mutated.
+        """
+        encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
+        encoded_event = urllib.parse.quote(event_id, safe="")
+        path = f"/calendars/{encoded_cal}/events/{encoded_event}"
+
+        event = self._request("GET", path)
+        plan = plan_conference(event, conf)
+        if plan.action == "skip":
+            logger.info("Conference skipped for event %s: %s", event_id, plan.reason)
+            return plan
+        if self.dry_run:
+            logger.info("[DRY RUN] Would %s Meet link on event %s", plan.action, event_id)
+            return plan
+
+        patch_body = {
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            }
+        }
+        resp = self._request(
+            "PATCH", path, params={"conferenceDataVersion": 1}, body=patch_body
+        )
+        # A pending create request carries no Meet URI yet: re-read the event a few times.
+        for attempt in range(self.conference_poll_attempts):
+            if _meet_code(resp) or attempt == self.conference_poll_attempts - 1:
+                break
+            time.sleep(self.conference_poll_delay)
+            resp = self._request("GET", path)
+
+        code = _meet_code(resp)
+        if code is None:
+            logger.warning(
+                "Meet link for event %s is still pending after %d reads; metadata not written",
+                event_id,
+                self.conference_poll_attempts,
+            )
+            return plan
+
+        if plan.action == "replace":
+            old = [
+                u
+                for u in event_conference_uris(resp)
+                if normalize_meet_code(u) is None
+                and _provider_for_uri(u) in set(conf.replace)
+            ]
+            if old:
+                logger.warning(
+                    "Event %s still lists replaced provider link(s) %s after the Meet "
+                    "create request; metadata not written",
+                    event_id,
+                    old,
+                )
+                return plan
+
+        private = dict((event.get("extendedProperties") or {}).get("private") or {})
+        private["cuecalMeetingId"] = code
+        meta: dict[str, Any] = {"extendedProperties": {"private": private}}
+        # Keep a physical location; only an empty one or a replaced provider's URL is overwritten.
+        location = (event.get("location") or "").strip()
+        if not location or _provider_for_uri(location) in set(conf.replace):
+            meta["location"] = meet_join_url(code)
+        self._request("PATCH", path, body=meta)
+        return plan
 
     def busy(self, start: datetime, end: datetime) -> list[SinkEvent]:
         """Return existing events overlapping the given time window."""
