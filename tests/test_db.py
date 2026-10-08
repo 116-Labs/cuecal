@@ -20,6 +20,7 @@ def test_migrate_from_empty(tmp_path):
         "pending",
         "service_run",
         "service_stat",
+        "near_miss",
     } <= _tables(conn)
 
 
@@ -168,4 +169,54 @@ def test_pending_crud_helpers(tmp_path):
     assert db.approve_pending(conn, pid2) is True
     assert db.get_pending(conn, pid2)["status"] == "approved"
     assert db.list_pending(conn, status="pending") == []
+
+
+def test_near_miss_crud_helpers(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    assert db.list_near_misses(conn) == []
+
+    mid = db.record_near_miss(
+        conn,
+        source="gmail",
+        message_id="msg_001",
+        sender="bob@example.com",
+        text="Quick sync tomorrow?",
+        score=0.35,
+        confidence=0.0,
+        reason="dropped by extractor",
+    )
+    assert mid > 0
+
+    misses = db.list_near_misses(conn)
+    assert len(misses) == 1
+    assert misses[0]["id"] == mid
+    assert misses[0]["source"] == "gmail"
+    assert misses[0]["message_id"] == "msg_001"
+    assert misses[0]["score"] == 0.35
+    assert misses[0]["sender"] == "bob@example.com"
+    assert misses[0]["text"] == "Quick sync tomorrow?"
+
+    # get_near_miss
+    item = db.get_near_miss(conn, "gmail", "msg_001")
+    assert item is not None
+    assert item["id"] == mid
+    assert item["reason"] == "dropped by extractor"
+
+    # Non-existent
+    assert db.get_near_miss(conn, "gmail", "msg_nonexistent") is None
+
+    # Upsert on conflict
+    mid2 = db.record_near_miss(
+        conn,
+        source="gmail",
+        message_id="msg_001",
+        sender="bob@example.com",
+        text="Updated text",
+        score=0.45,
+    )
+    assert mid2 == mid
+    updated_item = db.get_near_miss(conn, "gmail", "msg_001")
+    assert updated_item["text"] == "Updated text"
+    assert updated_item["score"] == 0.45
+
 

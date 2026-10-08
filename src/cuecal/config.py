@@ -29,7 +29,16 @@ pending = 0.5
 # Only keyring entry names belong here, never tokens. Store secrets with `cuecal auth <provider>`.
 """
 
-_TOP_KEYS = {"sources", "sink", "poll_interval_seconds", "llm", "thresholds", "secrets", "gmail"}
+_TOP_KEYS = {
+    "sources",
+    "sink",
+    "poll_interval_seconds",
+    "llm",
+    "thresholds",
+    "secrets",
+    "gmail",
+    "limits",
+}
 _LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
 
@@ -40,8 +49,10 @@ class ConfigError(ValueError):
 
 @dataclass
 class GmailConfig:
-    query: str = "zoom.us OR meet.google.com OR teams.microsoft.com OR filename:ics"
+    query: str = ""
     lookback_days: int = 7
+    fetch_limit: int = 100
+    latency_budget_seconds: float = 30.0
 
 
 @dataclass
@@ -54,6 +65,8 @@ class Config:
     pending_threshold: float = 0.5
     secrets: dict[str, str] = field(default_factory=dict)
     gmail: GmailConfig = field(default_factory=GmailConfig)
+    fetch_limit: int = 100
+    latency_budget_seconds: float = 30.0
 
 
 def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
@@ -120,14 +133,41 @@ def parse_config(data: dict[str, Any]) -> Config:
             )
     cfg.secrets = dict(secrets)
 
-    gmail_data = _table(data, "gmail", {"query", "lookback_days"})
+    gmail_data = _table(
+        data, "gmail", {"query", "lookback_days", "fetch_limit", "latency_budget_seconds"}
+    )
     query = gmail_data.get("query", cfg.gmail.query)
     if not isinstance(query, str):
         raise ConfigError("gmail.query must be a string")
     lookback = gmail_data.get("lookback_days", cfg.gmail.lookback_days)
     if isinstance(lookback, bool) or not isinstance(lookback, int) or lookback < 1:
         raise ConfigError("gmail.lookback_days must be a positive integer")
-    cfg.gmail = GmailConfig(query=query, lookback_days=lookback)
+    g_fetch_limit = gmail_data.get("fetch_limit", cfg.gmail.fetch_limit)
+    if isinstance(g_fetch_limit, bool) or not isinstance(g_fetch_limit, int) or g_fetch_limit < 1:
+        raise ConfigError("gmail.fetch_limit must be a positive integer")
+    g_latency = gmail_data.get("latency_budget_seconds", cfg.gmail.latency_budget_seconds)
+    if isinstance(g_latency, bool) or not isinstance(g_latency, int | float) or g_latency <= 0:
+        raise ConfigError("gmail.latency_budget_seconds must be a positive number")
+    cfg.gmail = GmailConfig(
+        query=query,
+        lookback_days=lookback,
+        fetch_limit=g_fetch_limit,
+        latency_budget_seconds=float(g_latency),
+    )
+
+    limits_data = _table(data, "limits", {"fetch_limit", "latency_budget_seconds"})
+    fetch_limit = limits_data.get("fetch_limit", cfg.fetch_limit)
+    if isinstance(fetch_limit, bool) or not isinstance(fetch_limit, int) or fetch_limit < 1:
+        raise ConfigError("limits.fetch_limit must be a positive integer")
+    cfg.fetch_limit = fetch_limit
+    latency_budget = limits_data.get("latency_budget_seconds", cfg.latency_budget_seconds)
+    if (
+        isinstance(latency_budget, bool)
+        or not isinstance(latency_budget, int | float)
+        or latency_budget <= 0
+    ):
+        raise ConfigError("limits.latency_budget_seconds must be a positive number")
+    cfg.latency_budget_seconds = float(latency_budget)
 
     return cfg
 

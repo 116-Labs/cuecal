@@ -8,7 +8,7 @@ auth_prefix = "Bearer "
 list_tool = "list_emails"
 
 [list_args]
-query = "meeting OR invite OR .ics"
+query = ""
 cursor = "{cursor}"
 limit = 50
 

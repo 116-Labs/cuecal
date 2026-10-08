@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import re
 import sys
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from . import __version__, db, lock, log, paths, registry, secrets, service
 from .config import ConfigError, load_config, write_default_config
@@ -58,15 +62,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_id = db.record_run_start(conn)
         try:
             cfg = load_config(paths.config_path())
+            from cuecal.extract import extract
+
             sink_plugin = None
             try:
                 sink_plugin = registry.get("sinks", cfg.sink)
             except KeyError:
                 logger.warning("sink %r not found; skipping sink writes", cfg.sink)
-
-            import time
-
-            from cuecal.extract import extract
 
             sources = []
             for source_name in cfg.sources:
@@ -74,10 +76,33 @@ def cmd_run(args: argparse.Namespace) -> int:
                     name = source_name.split(":", 1)[1] if ":" in source_name else source_name
                     from cuecal.sources.mcp import load_source
 
-                    sources.append(load_source(name))
+                    sources.append(
+                        load_source(
+                            name,
+                            fetch_limit=cfg.fetch_limit,
+                            latency_budget_seconds=cfg.latency_budget_seconds,
+                        )
+                    )
                 else:
                     cls = registry.get("sources", source_name)
-                    sources.append(cls())
+                    if source_name == "gmail":
+                        sources.append(
+                            cls(
+                                query=cfg.gmail.query,
+                                lookback_days=cfg.gmail.lookback_days,
+                                fetch_limit=cfg.gmail.fetch_limit,
+                                latency_budget_seconds=cfg.gmail.latency_budget_seconds,
+                            )
+                        )
+                    elif source_name == "slack":
+                        sources.append(
+                            cls(
+                                fetch_limit=cfg.fetch_limit,
+                                latency_budget_seconds=cfg.latency_budget_seconds,
+                            )
+                        )
+                    else:
+                        sources.append(cls())
 
             while True:
                 for source in sources:
@@ -87,6 +112,38 @@ def cmd_run(args: argparse.Namespace) -> int:
                     for msg in messages:
                         cand = extract(msg)
                         if not cand:
+                            # Dropped candidate: record near-miss with score based on
+                            # meeting signals
+                            score = 0.0
+                            text_lower = (msg.text or "").lower()
+                            meeting_words = (
+                                "meet",
+                                "meeting",
+                                "sync",
+                                "call",
+                                "chat",
+                                "zoom",
+                                "hangout",
+                                "schedule",
+                                "calendar",
+                                "invite",
+                                "catch up",
+                                "talk",
+                            )
+                            matches = sum(1 for w in meeting_words if w in text_lower)
+                            if matches > 0:
+                                score = min(0.1 * matches, 0.49)
+                            if not args.dry_run:
+                                db.record_near_miss(
+                                    conn,
+                                    source=msg.source if hasattr(msg, "source") else source.name,
+                                    message_id=msg.id if hasattr(msg, "id") else "",
+                                    sender=msg.sender if hasattr(msg, "sender") else "",
+                                    text=msg.text if hasattr(msg, "text") else "",
+                                    score=score,
+                                    confidence=0.0,
+                                    reason="dropped by extractor (no link or template match)",
+                                )
                             continue
 
                         if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
@@ -417,6 +474,105 @@ def cmd_service(args: argparse.Namespace) -> int:
     return _not_implemented(f"service {args.action}")
 
 
+def cmd_misses(args: argparse.Namespace) -> int:
+    conn = db.connect(paths.db_path())
+    try:
+        limit = getattr(args, "limit", 50)
+        items = db.list_near_misses(conn, limit=limit)
+        if not items:
+            print("no near-misses captured")
+            return 0
+
+        print(f"{len(items)} captured near-miss{'es' if len(items) != 1 else ''}:\n")
+        for item in items:
+            raw_score = item.get("score")
+            score = raw_score if raw_score is not None else item.get("confidence", 0.0)
+            print(f"[{item['id']}] {item['source']}:{item['message_id']} (score: {score:.2f})")
+            if item.get("sender"):
+                print(f"  Sender:   {item['sender']}")
+            if item.get("reason"):
+                print(f"  Reason:   {item['reason']}")
+            if item.get("text"):
+                snippet = item["text"].strip().replace("\n", " ")
+                if len(snippet) > 80:
+                    snippet = snippet[:77] + "..."
+                print(f"  Snippet:  {snippet}")
+            if item.get("created_at"):
+                print(f"  Captured: {item['created_at']}")
+            print()
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_missed(args: argparse.Namespace) -> int:
+    source = args.source
+    msg_id = args.msg_id
+    label = getattr(args, "label", "new_invite") or "new_invite"
+    category = getattr(args, "category", "invites") or "invites"
+
+    conn = db.connect(paths.db_path())
+    try:
+        near_miss = db.get_near_miss(conn, source, msg_id)
+
+        text = getattr(args, "text", None)
+        sender = getattr(args, "sender", None)
+        ts_iso = None
+
+        if near_miss:
+            if not text:
+                text = near_miss.get("text", "")
+            if not sender:
+                sender = near_miss.get("sender", "")
+            ts_iso = near_miss.get("created_at")
+
+        if not text:
+            text = f"Missed invite from {source}:{msg_id}"
+
+        if not sender:
+            sender = "unknown@example.com"
+
+        sanitized_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", f"missed-{source}-{msg_id}")
+
+        from cuecal.eval.schema import EvalFixture, EvalFixtureInput, ExpectedOutput
+
+        fixture = EvalFixture(
+            id=sanitized_id,
+            category=category,
+            label=label,
+            input=EvalFixtureInput(
+                text=text,
+                received_at=ts_iso or datetime.now(UTC).isoformat(),
+                sender=sender,
+            ),
+            expected=ExpectedOutput(
+                label=label,
+            ),
+            metadata={
+                "source": source,
+                "message_id": msg_id,
+                "feedback": "false_negative",
+                "flagged_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+        dataset_path = paths.dataset_dir() / category
+        fixture_file = dataset_path / f"{sanitized_id}.json"
+
+        if args.dry_run:
+            print(f"dry-run: would save missed invite fixture to {fixture_file}")
+            return 0
+
+        dataset_path.mkdir(parents=True, exist_ok=True)
+        fixture_file.write_text(json.dumps(fixture.to_dict(), indent=2), encoding="utf-8")
+        print(
+            f"flagged missed invite {source}:{msg_id} -> saved to training dataset ({fixture_file})"
+        )
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     ok = True
     cfg_path = paths.config_path()
@@ -515,6 +671,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--attendees", help="comma-separated attendee emails/names")
     p.add_argument("--approve", action="store_true", help="approve immediately after editing")
     p.set_defaults(func=cmd_edit)
+
+    p = sub.add_parser(
+        "misses", parents=[common], help="list captured near-misses with classification scores"
+    )
+    p.add_argument("--limit", type=int, default=50, help="maximum number of misses to display")
+    p.set_defaults(func=cmd_misses)
+
+    p = sub.add_parser(
+        "missed", parents=[common], help="flag a missed invite to stage it for retraining"
+    )
+    p.add_argument("source", help="source name (gmail, slack, etc.)")
+    p.add_argument("msg_id", help="message id")
+    p.add_argument(
+        "--label", default="new_invite", help="classification label (default: new_invite)"
+    )
+    p.add_argument("--category", default="invites", help="fixture category (default: invites)")
+    p.add_argument("--text", help="override or provide message text")
+    p.add_argument("--sender", help="override or provide sender email/name")
+    p.set_defaults(func=cmd_missed)
 
     p = sub.add_parser("service", parents=[common], help="manage the background service")
     p.add_argument("action", choices=["install", "uninstall", "status"])

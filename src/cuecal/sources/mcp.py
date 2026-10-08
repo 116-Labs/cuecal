@@ -87,14 +87,26 @@ def _resolve_json_path(data: Any, path: str) -> Any:
 
 
 class MCPSource:
-    def __init__(self, name: str, mapping: MCPMapping):
+    def __init__(
+        self,
+        name: str,
+        mapping: MCPMapping,
+        fetch_limit: int = 50,
+        latency_budget_seconds: float = 30.0,
+    ):
         self.name = name
         self.mapping = mapping
+        self.fetch_limit = fetch_limit
+        self.latency_budget_seconds = latency_budget_seconds
 
-    def fetch_since(self, cursor: str | None) -> tuple[list[Message], str]:
-        return asyncio.run(self._fetch_async(cursor))
+    def fetch_since(
+        self, cursor: str | None, limit: int | None = None
+    ) -> tuple[list[Message], str]:
+        return asyncio.run(self._fetch_async(cursor, limit=limit))
 
-    async def _fetch_async(self, cursor: str | None) -> tuple[list[Message], str]:
+    async def _fetch_async(
+        self, cursor: str | None, limit: int | None = None
+    ) -> tuple[list[Message], str]:
         if self.mapping.transport == "stdio":
             if not self.mapping.command:
                 raise MCPError("stdio transport requires 'command'")
@@ -104,7 +116,7 @@ class MCPSource:
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    return await self._execute_fetch(session, cursor)
+                    return await self._execute_fetch(session, cursor, limit=limit)
         elif self.mapping.transport == "sse":
             if not self.mapping.url:
                 raise MCPError("sse transport requires 'url'")
@@ -118,15 +130,21 @@ class MCPSource:
             async with sse_client(self.mapping.url, headers=headers) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    return await self._execute_fetch(session, cursor)
+                    return await self._execute_fetch(session, cursor, limit=limit)
         else:
             raise MCPError(f"Unknown transport: {self.mapping.transport}")
 
     async def _execute_fetch(
-        self, session: ClientSession, cursor: str | None
+        self, session: ClientSession, cursor: str | None, limit: int | None = None
     ) -> tuple[list[Message], str]:
+        effective_limit = limit if limit is not None else self.fetch_limit
         # Prepare args
         args = dict(self.mapping.list_args or {})
+        if "limit" in args:
+            try:
+                args["limit"] = min(int(args["limit"]), effective_limit)
+            except (ValueError, TypeError):
+                args["limit"] = effective_limit
         for k, v in list(args.items()):
             if isinstance(v, str) and "{cursor}" in v:
                 if cursor:
@@ -155,11 +173,13 @@ class MCPSource:
         if not isinstance(items, list):
             raise MCPError(f"Items path {self.mapping.items_path!r} did not resolve to a list")
 
-        next_cursor = _resolve_json_path(data, self.mapping.cursor_path) or cursor or ""
-
-        messages = []
-        for item in items:
-            messages.append(self._parse_message(item))
+        if len(items) > effective_limit:
+            messages = [self._parse_message(item) for item in items[:effective_limit]]
+            next_cursor = cursor or ""
+        else:
+            messages = [self._parse_message(item) for item in items]
+            resolved_cursor = _resolve_json_path(data, self.mapping.cursor_path)
+            next_cursor = resolved_cursor if resolved_cursor is not None else (cursor or "")
 
         return messages, str(next_cursor)
 

@@ -24,13 +24,7 @@ from cuecal.models import Message
 
 logger = logging.getLogger("cuecal.sources.slack")
 
-DEFAULT_SEARCH_TERMS: tuple[str, ...] = (
-    "zoom.us",
-    "meet.google.com",
-    "teams.microsoft.com",
-    "teams.live.com",
-    "webex.com",
-)
+DEFAULT_SEARCH_TERMS: tuple[str, ...] = ()
 
 # Regexes for unwrapping Slack mrkdwn formatting
 _MAILTO_RE = re.compile(r"<mailto:([^|>]+)(?:\|([^>]+))?>")
@@ -301,6 +295,8 @@ class SlackSource:
     channels: list[str] | None = None
     query_builder: SlackQueryBuilder = field(default_factory=SlackQueryBuilder)
     client: SlackClient | None = None
+    fetch_limit: int = 100
+    latency_budget_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if not self.token:
@@ -321,11 +317,15 @@ class SlackSource:
         self.client = SlackClient(token=self.token)
         return self.client
 
-    def fetch_since(self, cursor: str | None) -> tuple[list[Message], str | None]:
+    def fetch_since(
+        self, cursor: str | None, limit: int | None = None
+    ) -> tuple[list[Message], str | None]:
         """Fetch messages arriving after cursor (Slack timestamp)."""
         client = self._ensure_client()
         messages: list[Message] = []
         cursor_ts = float(cursor) if cursor else 0.0
+        effective_limit = limit if limit is not None else self.fetch_limit
+        start_time = time.monotonic()
 
         if not self.channels:
             # Default fetch strategy: search.messages with modular meeting terms
@@ -342,6 +342,12 @@ class SlackSource:
             page = 1
             max_pages = 10
             while page <= max_pages:
+                if time.monotonic() - start_time >= self.latency_budget_seconds:
+                    logger.warning(
+                        "Slack search fetch exceeded latency budget (%ss)",
+                        self.latency_budget_seconds,
+                    )
+                    break
                 resp = client.search_messages(query=query, page=page, count=100, sort_dir="desc")
                 msg_container = resp.get("messages", {})
                 matches = msg_container.get("matches", [])
@@ -391,8 +397,20 @@ class SlackSource:
         else:
             # Fallback strategy: conversations.history for configured channels/DMs
             for ch in self.channels:
+                if time.monotonic() - start_time >= self.latency_budget_seconds:
+                    logger.warning(
+                        "Slack conversations fetch exceeded latency budget (%ss)",
+                        self.latency_budget_seconds,
+                    )
+                    break
                 cursor_param: str | None = None
                 while True:
+                    if time.monotonic() - start_time >= self.latency_budget_seconds:
+                        logger.warning(
+                            "Slack conversations fetch exceeded latency budget (%ss)",
+                            self.latency_budget_seconds,
+                        )
+                        break
                     resp = client.conversations_history(
                         channel=ch, oldest=cursor, cursor=cursor_param, limit=100
                     )
@@ -432,14 +450,17 @@ class SlackSource:
                         break
                     cursor_param = next_page_cursor
 
-        # Sort chronologically by timestamp
+        # Sort chronologically by timestamp (oldest first)
         messages.sort(key=lambda m: m.ts)
+
+        # Apply fetch limit to the oldest messages so cursor advances sequentially
+        if len(messages) > effective_limit:
+            messages = messages[:effective_limit]
 
         next_cursor = cursor
         if messages:
-            # Find newest ts among returned messages
-            newest_ts = max(m.id.split(":")[-1] for m in messages)
-            next_cursor = newest_ts
+            # The next cursor is the timestamp of the newest message kept
+            next_cursor = messages[-1].id.split(":")[-1]
 
         return messages, next_cursor
 
