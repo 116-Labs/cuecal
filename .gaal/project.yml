@@ -23,6 +23,7 @@ commits:
 branches:
   prefix: gaal/
 merge:
+  auto: true
   queue: false
   method: squash
   message_source: commits
