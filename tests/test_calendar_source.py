@@ -54,6 +54,7 @@ class FakeCalendarApi:
         self.target: dict[str, dict[str, Any]] = {}
         self.sources: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         self.calls: list[tuple[str, str, dict[str, Any], dict[str, Any] | None]] = []
+        self.calendar_list_error: Exception | None = None
         self._ids = 0
 
     def seed(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -73,6 +74,8 @@ class FakeCalendarApi:
         params = dict(params or {})
         self.calls.append((method, path, params, copy.deepcopy(json)))
         if path == "/users/me/calendarList":
+            if self.calendar_list_error is not None:
+                raise self.calendar_list_error
             return self.calendar_list
         parts = path.split("/")
         cal = urllib.parse.unquote(parts[2])
@@ -395,6 +398,47 @@ def test_declining_the_source_event_deletes_its_mirror(api, conn):
     work.changes = [declined]
     source.sync(conn)
     assert mirrors(api) == {}
+
+
+def _expiring(calendar: ScriptedCalendar) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def respond(params: dict[str, Any]) -> dict[str, Any]:
+        if "syncToken" in params:
+            raise ApiError(410)
+        return calendar(params)
+
+    return respond
+
+
+def test_410_resync_deletes_mirrors_of_events_removed_meanwhile(api, conn):
+    work = ScriptedCalendar(
+        [event("w1", NOW + timedelta(days=1)), event("w2", NOW + timedelta(days=2))]
+    )
+    api.sources[WORK] = work
+    api.sources[TEAM] = ScriptedCalendar([event("t1", NOW + timedelta(days=2))])
+    source = make_source(api, [WORK, TEAM])
+    source.sync(conn)
+    # A mirror beyond the window (e.g. after lookahead_days shrank) is not judged by the resync.
+    api.seed(
+        {
+            **event("far", NOW + timedelta(days=20), summary="Far"),
+            "extendedProperties": {"private": {"cuecalMirror": "true", MIRROR_OF: f"{WORK}:far"}},
+        }
+    )
+    assert set(mirrors(api)) == {f"{WORK}:w1", f"{WORK}:w2", f"{TEAM}:t1", f"{WORK}:far"}
+
+    # w2 is deleted while the sync token is invalid: the window resync never lists it.
+    work.events = [e for e in work.events if e["id"] != "w2"]
+    api.sources[WORK] = _expiring(work)
+    api.calls.clear()
+
+    planned = source.sync(conn, dry_run=True)
+    assert [(op.action, op.key) for op in planned] == [("delete", f"{WORK}:w2")]
+    assert api.writes() == []
+
+    ops = source.sync(conn)
+    assert [(op.action, op.key) for op in ops] == [("delete", f"{WORK}:w2")]
+    assert set(mirrors(api)) == {f"{WORK}:w1", f"{TEAM}:t1", f"{WORK}:far"}
+    assert all(w[0] == "DELETE" and w[2]["sendUpdates"] == "none" for w in api.writes())
 
 
 # -- Filters ---------------------------------------------------------------------------
@@ -732,6 +776,44 @@ def test_cli_run_once_creates_mirrors(cli_env, api):
     api.sources[WORK] = ScriptedCalendar([event("w1", NOW + timedelta(days=1))])
     assert cli.main(["run", "--once"]) == 0
     assert set(mirrors(api)) == {f"{WORK}:w1"}
+
+
+@pytest.mark.parametrize(
+    "error", [ApiError(401), ApiError(403), OSError("network is unreachable")]
+)
+def test_cli_run_continues_when_calendar_list_fails(cli_env, api, caplog, error):
+    fetched: list[str | None] = []
+
+    class FakeGmail:
+        name = "gmail"
+
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def fetch_since(self, cursor: str | None) -> tuple[list[Any], str | None]:
+            fetched.append(cursor)
+            return [], "gmail-cursor"
+
+    registry.register("sources", "gmail", FakeGmail)
+    (cli_env / "config.toml").write_text(
+        f'sources = ["calendar", "gmail"]\n[mirror]\nsource_calendars = ["{WORK}"]\n',
+        encoding="utf-8",
+    )
+    api.calendar_list_error = error
+
+    with caplog.at_level("WARNING", logger="cuecal.sources.calendar"):
+        assert cli.main(["run", "--once"]) == 0
+
+    assert "reading the calendar list failed" in caplog.text
+    assert fetched == [None]
+    conn = db.connect(cli_env / "state.db")
+    try:
+        assert db.get_cursor(conn, "gmail") == "gmail-cursor"
+        last = conn.execute("SELECT status FROM service_run ORDER BY id DESC").fetchone()
+        assert last[0] == "success"
+    finally:
+        conn.close()
+    assert api.writes() == []
 
 
 def test_cli_mirror_calendars_picker_warns_on_free_busy(cli_env, capsys):

@@ -7,8 +7,10 @@ messages and the work happens in :meth:`CalendarSource.sync`, which ``cuecal run
 
 Each source calendar keeps its own ``syncToken`` cursor (``calendar:<id>``) and the horizon of
 its last window scan (``calendar-window:<id>``), so events that enter the lookahead window as
-time passes are listed once. Mirrors carry ``cuecalMirrorOf=<calendarId>:<eventId>`` and are
-written with ``sendUpdates=none``; original guests are never copied.
+time passes are listed once. A full resync (first run, lost cursor or a 410) also deletes
+in-window mirrors whose source event it no longer lists. Mirrors carry
+``cuecalMirrorOf=<calendarId>:<eventId>`` and are written with ``sendUpdates=none``; original
+guests are never copied.
 """
 
 from __future__ import annotations
@@ -353,8 +355,12 @@ class CalendarSource:
 
     def sync(self, conn: sqlite3.Connection, *, dry_run: bool = False) -> list[MirrorOp]:
         """Mirror every configured source calendar. Under ``dry_run`` nothing is written."""
-        warnings = self.source_warnings()
-        known = {c.id: c for c in self.list_calendars()}
+        try:
+            warnings = self.source_warnings()
+            known = {c.id: c for c in self.list_calendars()}
+        except Exception as exc:  # noqa: BLE001 - mirroring must not stop the other sources
+            logger.warning("reading the calendar list failed; skipping mirroring: %s", exc)
+            return []
         ops: list[MirrorOp] = []
         for cal_id in self.cfg.source_calendars:
             if cal_id in warnings:
@@ -407,11 +413,52 @@ class CalendarSource:
             op = self._apply(info, event, now=now, horizon=horizon, dry_run=dry_run)
             if op is not None:
                 ops.append(op)
+        if full:
+            listed = {e.get("id") for e in changed}
+            ops.extend(
+                self._reconcile_window(info, listed, now=now, horizon=horizon, dry_run=dry_run)
+            )
 
         if not dry_run:
             if next_token:
                 db.set_cursor(conn, token_cursor_key(info.id), next_token)
             db.set_cursor(conn, window_cursor_key(info.id), _iso(horizon))
+        return ops
+
+    def _reconcile_window(
+        self,
+        info: CalendarInfo,
+        listed: set[str | None],
+        *,
+        now: datetime,
+        horizon: datetime,
+        dry_run: bool,
+    ) -> list[MirrorOp]:
+        """Delete this calendar's in-window mirrors whose source event a full resync missed.
+
+        A full listing omits events deleted while the sync token was invalid, so they never
+        arrive as ``cancelled``; their mirrors would otherwise stay forever.
+        """
+        prefix = f"{info.id}:"
+        params = {
+            "privateExtendedProperty": f"{MIRROR_PROPERTY}=true",
+            "singleEvents": "true",
+            "timeMin": _iso(now),
+            "timeMax": _iso(horizon),
+        }
+        ops: list[MirrorOp] = []
+        for item in self._list_target(params):
+            key = mirror_key(item)
+            if not key or not key.startswith(prefix) or key[len(prefix) :] in listed:
+                continue
+            start_raw = (item.get("start") or {}).get("dateTime")
+            start = _parse_dt(start_raw)
+            end = _parse_dt((item.get("end") or {}).get("dateTime")) or start
+            if start is None or end is None or end <= now or start >= horizon:
+                continue
+            ops.append(MirrorOp("delete", key, item.get("summary") or "", start_raw, item["id"]))
+            if not dry_run:
+                self._request("DELETE", self._target_path(item["id"]), params=dict(_NO_EMAIL))
         return ops
 
     def _find_mirror(self, key: str) -> dict[str, Any] | None:

@@ -33,6 +33,7 @@ pending = 0.5
 # Mirror secondary calendars into the target calendar: add "calendar" to `sources` and pick
 # calendar IDs from `cuecal mirror calendars`.
 # [mirror]
+# With the google-calendar sink the target must be "primary" (or mirror.self_email).
 # target_calendar = "primary"
 # source_calendars = []
 # lookahead_days = 14
@@ -57,6 +58,7 @@ _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _TRANSPARENCIES = ("opaque", "transparent")
 _LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
+GOOGLE_SINK = "google-calendar"
 
 
 class ConfigError(ValueError):
@@ -250,7 +252,22 @@ def parse_config(data: dict[str, Any]) -> Config:
     )
 
     cfg.mirror = _parse_mirror(data)
+    _check_mirror_target(cfg)
     return cfg
+
+
+def _check_mirror_target(cfg: Config) -> None:
+    """The Google sink writes to the primary calendar; mirrors must land there too (#10 dedupe)."""
+    if GOOGLE_SINK not in (cfg.sink, *cfg.secondary_sinks):
+        return
+    target = cfg.mirror.target_calendar.lower()
+    if target == "primary" or (cfg.mirror.self_email and target == cfg.mirror.self_email.lower()):
+        return
+    raise ConfigError(
+        f"mirror.target_calendar {cfg.mirror.target_calendar!r} must be the primary calendar "
+        f"while the {GOOGLE_SINK!r} sink is used: that sink writes to 'primary', and dedupe "
+        "between mirrors and invites only looks in one calendar"
+    )
 
 
 def _parse_mirror(data: dict[str, Any]) -> MirrorConfig:
