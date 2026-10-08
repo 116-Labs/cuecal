@@ -11,7 +11,7 @@ import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from . import __version__, db, lock, log, paths, registry, secrets, service
+from . import __version__, db, lock, log, notify, paths, registry, secrets, service
 from .config import ConfigError, load_config, write_default_config
 from .models import MeetingCandidate
 
@@ -69,6 +69,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 sink_plugin = registry.get("sinks", cfg.sink)
             except KeyError:
                 logger.warning("sink %r not found; skipping sink writes", cfg.sink)
+
+            notifiers = notify.build_notifiers(cfg)
 
             sources = []
             for source_name in cfg.sources:
@@ -211,6 +213,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     cand.title,
                                     pending_id,
                                     reason,
+                                )
+                                notify.notify_pending(
+                                    notifiers, cand, snippet=snippet, pending_id=pending_id
                                 )
 
                     if next_cursor and not args.dry_run:

@@ -38,6 +38,7 @@ _TOP_KEYS = {
     "secrets",
     "gmail",
     "limits",
+    "notify",
 }
 _LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
@@ -67,6 +68,9 @@ class Config:
     gmail: GmailConfig = field(default_factory=GmailConfig)
     fetch_limit: int = 100
     latency_budget_seconds: float = 30.0
+    notify_desktop: bool = True
+    notify_ntfy_topic: str = ""
+    notify_ntfy_server: str = "https://ntfy.sh"
 
 
 def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
@@ -168,6 +172,20 @@ def parse_config(data: dict[str, Any]) -> Config:
     ):
         raise ConfigError("limits.latency_budget_seconds must be a positive number")
     cfg.latency_budget_seconds = float(latency_budget)
+
+    notify = _table(data, "notify", {"desktop", "ntfy_topic", "ntfy_server"})
+    desktop = notify.get("desktop", cfg.notify_desktop)
+    if not isinstance(desktop, bool):
+        raise ConfigError("notify.desktop must be a boolean")
+    cfg.notify_desktop = desktop
+    topic = notify.get("ntfy_topic", cfg.notify_ntfy_topic)
+    if not isinstance(topic, str):
+        raise ConfigError("notify.ntfy_topic must be a string")
+    cfg.notify_ntfy_topic = topic.strip()
+    server = notify.get("ntfy_server", cfg.notify_ntfy_server)
+    if not isinstance(server, str) or not server.startswith(("https://", "http://")):
+        raise ConfigError("notify.ntfy_server must be an http(s) URL")
+    cfg.notify_ntfy_server = server
 
     return cfg
 
