@@ -1,0 +1,56 @@
+{
+  "kind": "calendar#events",
+  "summary": "Work (other account)",
+  "timeZone": "America/Los_Angeles",
+  "accessRole": "reader",
+  "nextPageToken": "page-2",
+  "items": [
+    {
+      "kind": "calendar#event",
+      "id": "standup_20261009T160000Z",
+      "status": "confirmed",
+      "htmlLink": "https://www.google.com/calendar/event?eid=c3RhbmR1cF8yMDI2MTAwOVQxNjAwMDBa",
+      "updated": "2026-10-01T10:00:00.000Z",
+      "summary": "Daily sync",
+      "start": {"dateTime": "2026-10-09T09:00:00-07:00", "timeZone": "America/Los_Angeles"},
+      "end": {"dateTime": "2026-10-09T09:15:00-07:00", "timeZone": "America/Los_Angeles"},
+      "recurringEventId": "standup",
+      "originalStartTime": {"dateTime": "2026-10-09T09:00:00-07:00", "timeZone": "America/Los_Angeles"},
+      "iCalUID": "standup@google.com",
+      "hangoutLink": "https://meet.google.com/abc-defg-hij",
+      "conferenceData": {
+        "entryPoints": [
+          {"entryPointType": "video", "uri": "https://meet.google.com/abc-defg-hij", "label": "meet.google.com/abc-defg-hij"}
+        ],
+        "conferenceSolution": {"key": {"type": "hangoutsMeet"}, "name": "Google Meet"},
+        "conferenceId": "abc-defg-hij"
+      },
+      "organizer": {"email": "lead@work.example"},
+      "attendees": [
+        {"email": "lead@work.example", "organizer": true, "responseStatus": "accepted"},
+        {"email": "alice@work.example", "displayName": "Alice", "responseStatus": "accepted"},
+        {"email": "me@work.example", "self": true, "responseStatus": "accepted"}
+      ]
+    },
+    {
+      "kind": "calendar#event",
+      "id": "standup_20261010T160000Z",
+      "status": "confirmed",
+      "htmlLink": "https://www.google.com/calendar/event?eid=c3RhbmR1cF8yMDI2MTAxMFQxNjAwMDBa",
+      "updated": "2026-10-01T10:00:00.000Z",
+      "summary": "Daily sync",
+      "start": {"dateTime": "2026-10-10T09:00:00-07:00", "timeZone": "America/Los_Angeles"},
+      "end": {"dateTime": "2026-10-10T09:15:00-07:00", "timeZone": "America/Los_Angeles"},
+      "recurringEventId": "standup",
+      "originalStartTime": {"dateTime": "2026-10-10T09:00:00-07:00", "timeZone": "America/Los_Angeles"},
+      "iCalUID": "standup@google.com",
+      "hangoutLink": "https://meet.google.com/abc-defg-hij",
+      "organizer": {"email": "lead@work.example"},
+      "attendees": [
+        {"email": "lead@work.example", "organizer": true, "responseStatus": "accepted"},
+        {"email": "alice@work.example", "displayName": "Alice", "responseStatus": "accepted"},
+        {"email": "me@work.example", "self": true, "responseStatus": "accepted"}
+      ]
+    }
+  ]
+}

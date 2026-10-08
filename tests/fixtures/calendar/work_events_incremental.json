@@ -1,0 +1,39 @@
+{
+  "kind": "calendar#events",
+  "summary": "Work (other account)",
+  "timeZone": "America/Los_Angeles",
+  "accessRole": "reader",
+  "nextSyncToken": "sync-token-2",
+  "items": [
+    {
+      "kind": "calendar#event",
+      "id": "oneonone01",
+      "status": "confirmed",
+      "htmlLink": "https://www.google.com/calendar/event?eid=b25lb25vbmUwMQ",
+      "updated": "2026-10-08T13:00:00.000Z",
+      "summary": "1:1 Bob / Me",
+      "location": "Room 4B",
+      "start": {"dateTime": "2026-10-12T16:00:00Z", "timeZone": "UTC"},
+      "end": {"dateTime": "2026-10-12T16:30:00Z", "timeZone": "UTC"},
+      "iCalUID": "oneonone01@google.com",
+      "conferenceData": {
+        "entryPoints": [
+          {"entryPointType": "video", "uri": "https://us02web.zoom.us/j/1234567890?pwd=abc", "label": "Zoom"}
+        ],
+        "conferenceSolution": {"key": {"type": "addOn"}, "name": "Zoom Meeting"}
+      },
+      "organizer": {"email": "bob@work.example"},
+      "attendees": [
+        {"email": "bob@work.example", "displayName": "Bob", "organizer": true, "responseStatus": "accepted"},
+        {"email": "me@work.example", "self": true, "responseStatus": "accepted"}
+      ]
+    },
+    {
+      "kind": "calendar#event",
+      "id": "standup_20261010T160000Z",
+      "status": "cancelled",
+      "recurringEventId": "standup",
+      "originalStartTime": {"dateTime": "2026-10-10T09:00:00-07:00", "timeZone": "America/Los_Angeles"}
+    }
+  ]
+}

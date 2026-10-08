@@ -84,6 +84,30 @@ def parse_calendar_event(data: dict[str, Any]) -> SinkEvent:
     )
 
 
+def _mirror_of(event: dict[str, Any]) -> str | None:
+    """Return the ``cuecalMirrorOf`` key of a calendar mirror, else None."""
+    return ((event.get("extendedProperties") or {}).get("private") or {}).get("cuecalMirrorOf")
+
+
+SAME_MEETING_WINDOW = timedelta(minutes=15)
+
+
+def _starts_near(event: dict[str, Any], start: datetime | None) -> bool:
+    """True when the event starts within 15 minutes of ``start`` (one recurring instance)."""
+    raw = (event.get("start") or {}).get("dateTime")
+    if start is None or not raw:
+        return False
+    try:
+        ev_start = dateparser.parse(raw)
+    except (ValueError, OverflowError):
+        return False
+    if ev_start.tzinfo is None:
+        ev_start = ev_start.replace(tzinfo=UTC)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
+    return abs(ev_start - start) <= SAME_MEETING_WINDOW
+
+
 def _meet_code(event: dict[str, Any]) -> str | None:
     for uri in event_conference_uris(event):
         code = normalize_meet_code(uri)
@@ -273,21 +297,37 @@ class GoogleCalendarSink:
 
         return body
 
-    def find_by_meeting_id(self, meeting_id: str) -> SinkEvent | None:
-        """Look up an existing sink event by its unique meeting ID."""
+    def events_by_meeting_id(self, meeting_id: str) -> list[dict[str, Any]]:
+        """Return the raw, non-cancelled events carrying this ``cuecalMeetingId``."""
         encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
         params = {"privateExtendedProperty": f"cuecalMeetingId={meeting_id}"}
         resp = self._request("GET", f"/calendars/{encoded_cal}/events", params=params)
-        items = resp.get("items", [])
-        for item in items:
-            if item.get("status") != "cancelled":
-                return parse_calendar_event(item)
-        return None
+        return [i for i in resp.get("items", []) if i.get("status") != "cancelled"]
+
+    def find_by_meeting_id(self, meeting_id: str) -> SinkEvent | None:
+        """Look up an existing sink event by its unique meeting ID."""
+        items = self.events_by_meeting_id(meeting_id)
+        return parse_calendar_event(items[0]) if items else None
 
     def create(self, c: MeetingCandidate) -> SinkEvent:
-        """Create a new event from a MeetingCandidate (idempotent if meeting_id exists)."""
+        """Create a new event from a MeetingCandidate (idempotent if meeting_id exists).
+
+        A calendar mirror of the same meeting at the same time wins: it is returned untouched.
+        """
         if c.meeting_id:
-            existing = self.find_by_meeting_id(c.meeting_id)
+            items = self.events_by_meeting_id(c.meeting_id)
+            mirror = next(
+                (i for i in items if _mirror_of(i) and _starts_near(i, c.start)), None
+            )
+            if mirror is not None:
+                logger.info(
+                    "Event %s already mirrors meeting_id %s; leaving the mirror as is",
+                    mirror.get("id"),
+                    c.meeting_id,
+                )
+                return parse_calendar_event(mirror)
+            own = next((i for i in items if not _mirror_of(i)), None)
+            existing = parse_calendar_event(own) if own is not None else None
             if existing is not None:
                 logger.info(
                     "Event already exists for meeting_id %s; updating existing event %s",
