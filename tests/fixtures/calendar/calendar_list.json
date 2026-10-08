@@ -1,0 +1,37 @@
+{
+  "kind": "calendar#calendarList",
+  "etag": "\"p33c9vb0n2sjsl0g\"",
+  "nextSyncToken": "CKDs2Zr0lIoDEhRtZUBleGFtcGxlLmNvbQ==",
+  "items": [
+    {
+      "kind": "calendar#calendarListEntry",
+      "id": "me@example.com",
+      "summary": "me@example.com",
+      "timeZone": "America/Los_Angeles",
+      "accessRole": "owner",
+      "primary": true
+    },
+    {
+      "kind": "calendar#calendarListEntry",
+      "id": "work@group.calendar.google.com",
+      "summary": "Work (other account)",
+      "timeZone": "America/Los_Angeles",
+      "accessRole": "reader"
+    },
+    {
+      "kind": "calendar#calendarListEntry",
+      "id": "team@group.calendar.google.com",
+      "summary": "Team",
+      "summaryOverride": "Team calendar",
+      "timeZone": "UTC",
+      "accessRole": "writer"
+    },
+    {
+      "kind": "calendar#calendarListEntry",
+      "id": "busy@group.calendar.google.com",
+      "summary": "Partner availability",
+      "timeZone": "UTC",
+      "accessRole": "freeBusyReader"
+    }
+  ]
+}

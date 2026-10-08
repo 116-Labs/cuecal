@@ -29,6 +29,14 @@ pending = 0.5
 [secrets]
 # provider = "keyring-entry-name"
 # Only keyring entry names belong here, never tokens. Store secrets with `cuecal auth <provider>`.
+
+# Mirror secondary calendars into the target calendar: add "calendar" to `sources` and pick
+# calendar IDs from `cuecal mirror calendars`.
+# [mirror]
+# target_calendar = "primary"
+# source_calendars = []
+# lookahead_days = 14
+# self_attendee = true
 """
 
 _TOP_KEYS = {
@@ -43,8 +51,10 @@ _TOP_KEYS = {
     "limits",
     "notify",
     "conference",
+    "mirror",
 }
 _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
+_TRANSPARENCIES = ("opaque", "transparent")
 _LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
 
@@ -70,6 +80,19 @@ class ConferenceConfig:
 
 
 @dataclass
+class MirrorConfig:
+    # Calendar IDs come from `cuecal mirror calendars`; the target is never also a source.
+    target_calendar: str = "primary"
+    source_calendars: list[str] = field(default_factory=list)
+    lookahead_days: int = 14
+    include_transparent: bool = False
+    transparency: str = "opaque"
+    self_attendee: bool = True
+    # Target account email; looked up from the calendar list when empty.
+    self_email: str = ""
+
+
+@dataclass
 class Config:
     sources: list[str] = field(default_factory=list)
     sink: str = "google-calendar"
@@ -86,6 +109,7 @@ class Config:
     notify_ntfy_topic: str = ""
     notify_ntfy_server: str = "https://ntfy.sh"
     conference: ConferenceConfig = field(default_factory=ConferenceConfig)
+    mirror: MirrorConfig = field(default_factory=MirrorConfig)
 
 
 def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
@@ -225,7 +249,66 @@ def parse_config(data: dict[str, Any]) -> Config:
         preferred=preferred, replace=list(replace), provision_for=provision_for
     )
 
+    cfg.mirror = _parse_mirror(data)
     return cfg
+
+
+def _parse_mirror(data: dict[str, Any]) -> MirrorConfig:
+    default = MirrorConfig()
+    mirror = _table(
+        data,
+        "mirror",
+        {
+            "target_calendar",
+            "source_calendars",
+            "lookahead_days",
+            "include_transparent",
+            "transparency",
+            "self_attendee",
+            "self_email",
+        },
+    )
+    target = mirror.get("target_calendar", default.target_calendar)
+    if not isinstance(target, str) or not target:
+        raise ConfigError("mirror.target_calendar must be a non-empty string")
+    sources = mirror.get("source_calendars", default.source_calendars)
+    if not isinstance(sources, list) or not all(isinstance(s, str) and s for s in sources):
+        raise ConfigError("mirror.source_calendars must be a list of non-empty calendar IDs")
+    if len(set(sources)) != len(sources):
+        raise ConfigError("mirror.source_calendars must not repeat a calendar")
+    self_email = mirror.get("self_email", default.self_email)
+    if not isinstance(self_email, str):
+        raise ConfigError("mirror.self_email must be a string")
+    self_email = self_email.strip()
+    # "primary" is an alias for the account's own calendar, whose ID is the account email.
+    target_names = {target.lower()}
+    if target == "primary" and self_email:
+        target_names.add(self_email.lower())
+    if self_email and target.lower() == self_email.lower():
+        target_names.add("primary")
+    clash = [s for s in sources if s.lower() in target_names]
+    if clash:
+        raise ConfigError(
+            f"mirror.source_calendars must not include the target calendar {clash[0]!r}"
+        )
+    lookahead = mirror.get("lookahead_days", default.lookahead_days)
+    if isinstance(lookahead, bool) or not isinstance(lookahead, int) or lookahead < 1:
+        raise ConfigError("mirror.lookahead_days must be a positive integer")
+    for key in ("include_transparent", "self_attendee"):
+        if not isinstance(mirror.get(key, getattr(default, key)), bool):
+            raise ConfigError(f"mirror.{key} must be a boolean")
+    transparency = mirror.get("transparency", default.transparency)
+    if transparency not in _TRANSPARENCIES:
+        raise ConfigError(f"mirror.transparency must be one of {list(_TRANSPARENCIES)}")
+    return MirrorConfig(
+        target_calendar=target,
+        source_calendars=list(sources),
+        lookahead_days=lookahead,
+        include_transparent=mirror.get("include_transparent", default.include_transparent),
+        transparency=transparency,
+        self_attendee=mirror.get("self_attendee", default.self_attendee),
+        self_email=self_email,
+    )
 
 
 def load_config(path: Path) -> Config:

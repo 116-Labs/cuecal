@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import re
+import sqlite3
 import sys
 import time
 from collections.abc import Sequence
@@ -15,6 +16,7 @@ from . import __version__, db, lock, log, notify, paths, registry, secrets, serv
 from .config import Config, ConfigError, load_config, write_default_config
 from .models import MeetingCandidate
 from .sinks import fanout
+from .sources.calendar import CalendarSource
 
 logger = logging.getLogger("cuecal.cli")
 
@@ -34,6 +36,18 @@ def _secondary_sinks(cfg: Config) -> dict[str, object | None]:
             logger.warning("secondary sink %r not found; its writes are recorded as failed", name)
             resolved[name] = None
     return resolved
+
+
+def _calendar_source(cfg: Config) -> CalendarSource:
+    return CalendarSource(cfg.mirror)
+
+
+def _sync_mirrors(conn: sqlite3.Connection, source: CalendarSource, *, dry_run: bool) -> None:
+    for op in source.sync(conn, dry_run=dry_run):
+        if dry_run:
+            print(f"dry-run: would {op.describe()}")
+        else:
+            logger.info("mirror: %s", op.describe())
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -87,8 +101,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             notifiers = notify.build_notifiers(cfg)
 
             sources = []
+            mirror_source = None
             for source_name in cfg.sources:
-                if source_name.startswith("mcp:") or source_name in ["zoho-mail", "zoho-cliq"]:
+                if source_name == "calendar":
+                    # Calendar events are structured: they bypass the extractor and the queue.
+                    mirror_source = _calendar_source(cfg)
+                elif source_name.startswith("mcp:") or source_name in ["zoho-mail", "zoho-cliq"]:
                     name = source_name.split(":", 1)[1] if ":" in source_name else source_name
                     from cuecal.sources.mcp import load_source
 
@@ -123,6 +141,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             while True:
                 if secondaries and not args.dry_run:
                     fanout.retry_failed(conn, secondaries)
+
+                if mirror_source is not None:
+                    _sync_mirrors(conn, mirror_source, dry_run=args.dry_run)
 
                 for source in sources:
                     cursor = db.get_cursor(conn, source.name)
@@ -486,6 +507,34 @@ def cmd_service(args: argparse.Namespace) -> int:
     return _not_implemented(f"service {args.action}")
 
 
+def cmd_mirror(args: argparse.Namespace) -> int:
+    cfg = load_config(paths.config_path())
+    source = _calendar_source(cfg)
+    if args.action == "calendars":
+        targets = source.target_ids()
+        for cal in source.list_calendars():
+            tags = []
+            if cal.primary:
+                tags.append("primary")
+            if cal.id.lower() in targets:
+                tags.append("target")
+            if cal.id in cfg.mirror.source_calendars:
+                tags.append("source")
+            if cal.free_busy_only:
+                tags.append("free/busy only: cannot be mirrored")
+            print(f"{cal.id}  {cal.summary}" + (f"  [{', '.join(tags)}]" if tags else ""))
+        for cal_id, why in source.source_warnings().items():
+            print(f"warning: source calendar {cal_id!r} {why}")
+        return 0
+
+    ops = source.prune(dry_run=args.dry_run)
+    if not ops:
+        print("no mirrors to prune")
+    for op in ops:
+        print(f"dry-run: would {op.describe()}" if args.dry_run else f"{op.describe()}: done")
+    return 0
+
+
 def cmd_misses(args: argparse.Namespace) -> int:
     conn = db.connect(paths.db_path())
     try:
@@ -702,6 +751,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text", help="override or provide message text")
     p.add_argument("--sender", help="override or provide sender email/name")
     p.set_defaults(func=cmd_missed)
+
+    p = sub.add_parser(
+        "mirror", parents=[common], help="list calendars to mirror, or prune unused mirrors"
+    )
+    p.add_argument(
+        "action",
+        choices=["calendars", "prune"],
+        help="calendars: pick source/target IDs; prune: delete mirrors of removed sources",
+    )
+    p.set_defaults(func=cmd_mirror)
 
     p = sub.add_parser("service", parents=[common], help="manage the background service")
     p.add_argument("action", choices=["install", "uninstall", "status"])
