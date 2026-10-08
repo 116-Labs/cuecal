@@ -64,6 +64,21 @@ MIGRATIONS: list[str] = [
     ALTER TABLE pending ADD COLUMN source_snippet TEXT;
     ALTER TABLE pending ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
     """,
+    """
+    CREATE TABLE near_miss (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        sender TEXT,
+        text TEXT,
+        confidence REAL DEFAULT 0.0,
+        score REAL DEFAULT 0.0,
+        reason TEXT,
+        details_json TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (source, message_id)
+    );
+    """,
 ]
 
 
@@ -355,4 +370,96 @@ def approve_pending(conn: sqlite3.Connection, pending_id: int) -> bool:
 
 def reject_pending(conn: sqlite3.Connection, pending_id: int) -> bool:
     return update_pending(conn, pending_id, status="rejected")
+
+
+def record_near_miss(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    message_id: str,
+    sender: str = "",
+    text: str = "",
+    confidence: float = 0.0,
+    score: float | None = None,
+    reason: str | None = None,
+    details_json: str | None = None,
+) -> int:
+    eff_score = score if score is not None else confidence
+    cursor = conn.execute(
+        """
+        INSERT INTO near_miss (
+            source, message_id, sender, text, confidence, score, reason, details_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source, message_id) DO UPDATE SET
+            sender = excluded.sender,
+            text = excluded.text,
+            confidence = excluded.confidence,
+            score = excluded.score,
+            reason = excluded.reason,
+            details_json = excluded.details_json,
+            created_at = CURRENT_TIMESTAMP
+        """,
+        (source, message_id, sender, text, confidence, eff_score, reason, details_json),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def list_near_misses(
+    conn: sqlite3.Connection, *, limit: int | None = 50
+) -> list[dict[str, Any]]:
+    query = """
+        SELECT id, source, message_id, sender, text, confidence, score, reason,
+               details_json, created_at
+        FROM near_miss
+        ORDER BY id DESC
+    """
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+    rows = conn.execute(query).fetchall()
+    return [
+        {
+            "id": r[0],
+            "source": r[1],
+            "message_id": r[2],
+            "sender": r[3],
+            "text": r[4],
+            "confidence": r[5],
+            "score": r[6],
+            "reason": r[7],
+            "details_json": r[8],
+            "created_at": r[9],
+        }
+        for r in rows
+    ]
+
+
+def get_near_miss(
+    conn: sqlite3.Connection, source: str, message_id: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, source, message_id, sender, text, confidence, score, reason,
+               details_json, created_at
+        FROM near_miss
+        WHERE source = ? AND message_id = ?
+        """,
+        (source, message_id),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "source": row[1],
+        "message_id": row[2],
+        "sender": row[3],
+        "text": row[4],
+        "confidence": row[5],
+        "score": row[6],
+        "reason": row[7],
+        "details_json": row[8],
+        "created_at": row[9],
+    }
+
 

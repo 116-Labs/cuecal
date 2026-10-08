@@ -326,9 +326,11 @@ def test_matches_query_filtering():
         },
     }
 
-    assert matches_query(msg_zoom, DEFAULT_GMAIL_QUERY) is True
-    assert matches_query(msg_ics, DEFAULT_GMAIL_QUERY) is True
-    assert matches_query(msg_unrelated, DEFAULT_GMAIL_QUERY) is False
+    narrowing_query = "zoom.us OR meet.google.com OR teams.microsoft.com OR filename:ics"
+    assert matches_query(msg_zoom, narrowing_query) is True
+    assert matches_query(msg_ics, narrowing_query) is True
+    assert matches_query(msg_unrelated, narrowing_query) is False
+    assert matches_query(msg_unrelated, DEFAULT_GMAIL_QUERY) is True
     assert matches_query(msg_unrelated, None) is True
     assert matches_query(msg_unrelated, "") is True
     assert matches_query(msg_unrelated, "receipt OR invoice") is True
@@ -469,3 +471,53 @@ def test_config_gmail_section_parsing():
         parse_config({"gmail": {"lookback_days": 0}})
     with pytest.raises(ConfigError, match=r"unknown keys in \[gmail\]"):
         parse_config({"gmail": {"extra": "field"}})
+
+
+def test_gmail_fetch_limit(mock_gmail_api):
+    client, _ = mock_gmail_api
+    source = GmailSource(token_provider="dummy-token", http_client=client, fetch_limit=1)
+    messages, cursor = source.fetch_since(None)
+    assert len(messages) == 1
+
+
+def test_gmail_latency_budget(mock_gmail_api, monkeypatch):
+    client, _ = mock_gmail_api
+    source = GmailSource(
+        token_provider="dummy-token", http_client=client, latency_budget_seconds=0.0001
+    )
+
+    import time
+
+    time_calls = [0.0, 100.0, 200.0]
+    monkeypatch.setattr(time, "monotonic", lambda: time_calls.pop(0) if time_calls else 300.0)
+
+    messages, cursor = source.fetch_since(None)
+    # Exceeded budget before fetching all message details
+    assert len(messages) == 0
+
+
+def test_contract_incremental_fetch_limit_exhaustion_does_not_skip(mock_gmail_api):
+    client, _ = mock_gmail_api
+    history_multi = {
+        "historyId": "100600",
+        "history": [
+            {
+                "id": "100501",
+                "messagesAdded": [{"message": {"id": "msg_new_teams"}}],
+            },
+            {
+                "id": "100502",
+                "messagesAdded": [{"message": {"id": "msg_html_zoom"}}],
+            },
+        ],
+    }
+    client.responses["/users/me/history"] = history_multi
+    source = GmailSource(token_provider="dummy-token", http_client=client, fetch_limit=1)
+
+    # First fetch with limit=1 only processes record 1 and advances cursor to 100501
+    messages, next_cursor = source.fetch_since("100500")
+    assert len(messages) == 1
+    assert messages[0].id == "msg_new_teams"
+    assert next_cursor == "100501"
+
+

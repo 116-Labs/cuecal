@@ -1,8 +1,8 @@
 import pytest
 
-from cuecal import __version__, cli, registry
+from cuecal import __version__, cli, db, registry
 
-SUBCOMMANDS = ["init", "auth", "run", "pending", "service", "doctor"]
+SUBCOMMANDS = ["init", "auth", "run", "pending", "misses", "missed", "service", "doctor"]
 
 
 @pytest.fixture(autouse=True)
@@ -682,4 +682,128 @@ def test_cli_run_routes_low_confidence_to_pending(tmp_path, monkeypatch):
     cand_loaded = MeetingCandidate.from_json(p["candidate_json"])
     assert cand_loaded.title == "Low Conf Meeting"
     conn.close()
+
+
+def test_cli_misses_empty(tmp_path, capsys):
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["misses"]) == 0
+    out = capsys.readouterr().out
+    assert "no near-misses captured" in out
+
+
+def test_cli_misses_displays_records(tmp_path, capsys):
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    conn = db.connect(tmp_path / "state.db")
+    db.record_near_miss(
+        conn,
+        source="slack",
+        message_id="C01:1700000001",
+        sender="alice",
+        text="Are you free for a quick sync tomorrow?",
+        score=0.35,
+        reason="dropped by extractor",
+    )
+    conn.close()
+
+    assert cli.main(["misses"]) == 0
+    out = capsys.readouterr().out
+    assert "1 captured near-miss:" in out
+    assert "[1] slack:C01:1700000001 (score: 0.35)" in out
+    assert "Sender:   alice" in out
+    assert "Snippet:  Are you free for a quick sync tomorrow?" in out
+
+
+def test_cli_missed_flags_false_negative_into_dataset(tmp_path, monkeypatch, capsys):
+    dataset_dir = tmp_path / "custom_dataset"
+    monkeypatch.setenv("CUECAL_DATASET_DIR", str(dataset_dir))
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    conn = db.connect(tmp_path / "state.db")
+    db.record_near_miss(
+        conn,
+        source="gmail",
+        message_id="msg_987",
+        sender="partner@company.com",
+        text="Let's meet at 3pm on Friday for project kickoff.",
+        score=0.40,
+    )
+    conn.close()
+
+    # Dry run
+    assert cli.main(["--dry-run", "missed", "gmail", "msg_987"]) == 0
+    out = capsys.readouterr().out
+    assert "dry-run: would save missed invite fixture" in out
+    assert not dataset_dir.exists()
+
+    # Flag missed invite
+    assert cli.main(["missed", "gmail", "msg_987"]) == 0
+    out = capsys.readouterr().out
+    assert "flagged missed invite gmail:msg_987" in out
+
+    fixture_file = dataset_dir / "invites" / "missed-gmail-msg_987.json"
+    assert fixture_file.exists()
+
+    from cuecal.eval.schema import load_fixture
+    fixture = load_fixture(fixture_file)
+    assert fixture.id == "missed-gmail-msg_987"
+    assert fixture.category == "invites"
+    assert fixture.label == "new_invite"
+    assert fixture.input.text == "Let's meet at 3pm on Friday for project kickoff."
+    assert fixture.input.sender == "partner@company.com"
+    assert fixture.metadata["feedback"] == "false_negative"
+    assert fixture.metadata["source"] == "gmail"
+    assert fixture.metadata["message_id"] == "msg_987"
+
+
+def test_cli_run_captures_dropped_near_miss(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal.models import Message
+
+    assert cli.main(["init"]) == 0
+
+    class DummyChatSource:
+        name = "dummy-chat"
+
+        def fetch_since(self, cursor):
+            msg = Message(
+                id="msg_chat_1",
+                source="dummy-chat",
+                sender="colleague",
+                ts=datetime.now(),
+                text="Hey, can we schedule a quick call tomorrow afternoon?",
+            )
+            return [msg], "cursor_chat"
+
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummyChatSource
+        raise KeyError(name)
+
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+
+    config_path = tmp_path / "config.toml"
+    with open(config_path) as f:
+        content = f.read()
+    with open(config_path, "w") as f:
+        f.write(content.replace("sources = []", 'sources = ["dummy-chat"]'))
+
+    assert cli.main(["run", "--once"]) == 0
+
+    conn = db.connect(tmp_path / "state.db")
+    misses = db.list_near_misses(conn)
+    assert len(misses) == 1
+    m = misses[0]
+    assert m["source"] == "dummy-chat"
+    assert m["message_id"] == "msg_chat_1"
+    assert m["sender"] == "colleague"
+    assert m["score"] > 0.0
+    assert "dropped by extractor" in m["reason"]
+    conn.close()
+
 

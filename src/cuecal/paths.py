@@ -43,3 +43,11 @@ def lock_path() -> Path:
     if override:
         return Path(override)
     return user_data_path(APP_NAME) / "cuecal.lock"
+
+
+def dataset_dir() -> Path:
+    override = os.environ.get("CUECAL_DATASET_DIR")
+    if override:
+        return Path(override)
+    return user_data_path(APP_NAME) / "dataset"
+

@@ -298,10 +298,16 @@ def test_rate_limit_exhaustion_raises(monkeypatch):
 
 
 def test_modular_search_query():
-    # Default query
+    # Default query is broad (empty terms)
     qb = SlackQueryBuilder()
+    assert qb.build_query() == ""
+
+    # Narrowing meeting terms
+    qb_narrow = SlackQueryBuilder(
+        terms=("zoom.us", "meet.google.com", "teams.microsoft.com", "teams.live.com", "webex.com")
+    )
     assert (
-        qb.build_query()
+        qb_narrow.build_query()
         == "zoom.us OR meet.google.com OR teams.microsoft.com OR teams.live.com OR webex.com"
     )
 
@@ -313,9 +319,59 @@ def test_modular_search_query():
     qb_extra = SlackQueryBuilder(terms=("zoom.us",), extra_query="after:2026-10-01")
     assert qb_extra.build_query() == "zoom.us after:2026-10-01"
 
-    # Empty terms (future broadened fetch for #21)
+    # Empty terms (broadened fetch for #21)
     qb_empty = SlackQueryBuilder(terms=(), extra_query="has:link")
     assert qb_empty.build_query() == "has:link"
+
+
+def test_slack_fetch_limit(monkeypatch):
+    search_data = load_fixture("search_messages.json")
+    users_data = load_fixture("users_info.json")
+    client = SlackClient(token="xoxp-fake")
+
+    def mock_request(endpoint: str, params: dict | None = None):
+        if endpoint == "search.messages":
+            return search_data
+        if endpoint == "users.info":
+            return users_data
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_request", mock_request)
+    source = SlackSource(token="xoxp-fake", client=client, fetch_limit=2)
+
+    messages, next_cursor = source.fetch_since(cursor=None)
+    assert len(messages) == 2
+    # Ensure the oldest messages were selected and returned chronologically
+    assert messages[0].ts < messages[1].ts
+    assert next_cursor == "1700000200.000200"
+
+    # Subsequent fetch continues from cursor without dropping the newest message
+    messages2, next_cursor2 = source.fetch_since(cursor=next_cursor)
+    assert len(messages2) == 1
+    assert next_cursor2 == "1700000300.000300"
+
+
+def test_slack_latency_budget(monkeypatch):
+    search_data = load_fixture("search_messages.json")
+    users_data = load_fixture("users_info.json")
+    client = SlackClient(token="xoxp-fake")
+
+    import time
+    time_calls = [0.0, 100.0, 200.0]
+    monkeypatch.setattr(time, "monotonic", lambda: time_calls.pop(0) if time_calls else 300.0)
+
+    def mock_request(endpoint: str, params: dict | None = None):
+        if endpoint == "search.messages":
+            return search_data
+        if endpoint == "users.info":
+            return users_data
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_request", mock_request)
+    source = SlackSource(token="xoxp-fake", client=client, latency_budget_seconds=0.0001)
+
+    messages, _ = source.fetch_since(cursor=None)
+    assert len(messages) == 0
 
 
 # --- Metadata resolution & caching ---

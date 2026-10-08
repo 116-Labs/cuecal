@@ -45,7 +45,38 @@ def test_keyring_reference_accepted():
 
 
 def test_empty_config_uses_defaults():
-    assert parse_config({}).poll_interval_seconds == 300
+    cfg = parse_config({})
+    assert cfg.poll_interval_seconds == 300
+    assert cfg.fetch_limit == 100
+    assert cfg.latency_budget_seconds == 30.0
+    assert cfg.gmail.fetch_limit == 100
+    assert cfg.gmail.latency_budget_seconds == 30.0
+
+
+def test_limits_config_parsing():
+    cfg = parse_config(
+        {
+            "limits": {
+                "fetch_limit": 25,
+                "latency_budget_seconds": 12.5,
+            }
+        }
+    )
+    assert cfg.fetch_limit == 25
+    assert cfg.latency_budget_seconds == 12.5
+
+
+def test_gmail_config_limits_parsing():
+    cfg = parse_config(
+        {
+            "gmail": {
+                "fetch_limit": 15,
+                "latency_budget_seconds": 10.0,
+            }
+        }
+    )
+    assert cfg.gmail.fetch_limit == 15
+    assert cfg.gmail.latency_budget_seconds == 10.0
 
 
 @pytest.mark.parametrize(
@@ -64,6 +95,19 @@ def test_empty_config_uses_defaults():
         ({"thresholds": {"auto_create": 2}}, "thresholds.auto_create"),
         ({"thresholds": {"auto_create": 0.4, "pending": 0.6}}, "must not exceed"),
         ({"secrets": {"slack": 5}}, "secrets"),
+        ({"limits": {"fetch_limit": 0}}, "limits.fetch_limit"),
+        ({"limits": {"fetch_limit": -1}}, "limits.fetch_limit"),
+        ({"limits": {"fetch_limit": True}}, "limits.fetch_limit"),
+        ({"limits": {"fetch_limit": "50"}}, "limits.fetch_limit"),
+        ({"limits": {"latency_budget_seconds": 0}}, "limits.latency_budget_seconds"),
+        ({"limits": {"latency_budget_seconds": -5.0}}, "limits.latency_budget_seconds"),
+        ({"limits": {"latency_budget_seconds": True}}, "limits.latency_budget_seconds"),
+        ({"limits": {"latency_budget_seconds": "30"}}, "limits.latency_budget_seconds"),
+        ({"limits": {"extra": 1}}, "unknown keys in \\[limits\\]"),
+        ({"gmail": {"fetch_limit": 0}}, "gmail.fetch_limit"),
+        ({"gmail": {"fetch_limit": True}}, "gmail.fetch_limit"),
+        ({"gmail": {"latency_budget_seconds": 0}}, "gmail.latency_budget_seconds"),
+        ({"gmail": {"latency_budget_seconds": True}}, "gmail.latency_budget_seconds"),
     ],
 )
 def test_validation_errors(data, message):

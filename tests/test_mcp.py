@@ -79,6 +79,7 @@ def test_zoho_mail_mapping_contract():
     source = load_source("zoho-mail")
     assert mapping.name == "zoho-mail"
     assert mapping.list_tool == "list_emails"
+    assert mapping.list_args.get("query") == ""
 
     # Recorded sample response matching Zoho Mail schema
     sample_email = {
@@ -108,6 +109,7 @@ def test_zoho_cliq_mapping_contract():
     source = load_source("zoho-cliq")
     assert mapping.name == "zoho-cliq"
     assert mapping.list_tool == "list_messages"
+    assert mapping.list_args.get("query") == ""
 
     # Recorded sample response matching Zoho Cliq schema
     sample_message = {
@@ -126,3 +128,33 @@ def test_zoho_cliq_mapping_contract():
     # Must fail loudly if mapped fields are missing
     with pytest.raises(MCPError, match="Failed to map message fields"):
         source._parse_message({"message_id": "cliq_112233"})
+
+
+def test_mcp_fetch_limit():
+    stub_path = Path(__file__).parent / "stub_mcp_server.py"
+
+    mapping = MCPMapping(
+        name="test-zoho-mail",
+        transport="stdio",
+        command=sys.executable,
+        args=[str(stub_path)],
+        list_tool="list_emails",
+        list_args={"query": "", "cursor": "{cursor}"},
+        items_path="data.emails",
+        cursor_path="data.next_cursor",
+        field_mapping={
+            "id": "message_id",
+            "sender": "from_address",
+            "ts": "received_time",
+            "text": "body_text",
+            "permalink": "web_url",
+        },
+    )
+
+    source = MCPSource("test-zoho-mail", mapping, fetch_limit=0)
+    messages, next_cursor = source.fetch_since(None, limit=0)
+    assert len(messages) == 0
+    # Cursor should not advance to "cur123" when items are truncated
+    assert next_cursor == ""
+
+

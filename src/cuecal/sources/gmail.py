@@ -7,6 +7,7 @@ import html
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,7 +23,7 @@ from cuecal.models import Message
 
 logger = logging.getLogger("cuecal.sources.gmail")
 
-DEFAULT_GMAIL_QUERY = "zoom.us OR meet.google.com OR teams.microsoft.com OR filename:ics"
+DEFAULT_GMAIL_QUERY = ""
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
 
 
@@ -264,6 +265,8 @@ class GmailSource:
         lookback_days: int = 7,
         user_id: str = "me",
         http_client: Any = None,
+        fetch_limit: int = 100,
+        latency_budget_seconds: float = 30.0,
     ) -> None:
         self.token_provider = token_provider
         self.secret_ref = secret_ref
@@ -271,6 +274,8 @@ class GmailSource:
         self.lookback_days = lookback_days
         self.user_id = user_id
         self._http_client = http_client
+        self.fetch_limit = fetch_limit
+        self.latency_budget_seconds = latency_budget_seconds
 
     def _get_token(self) -> str:
         if callable(self.token_provider):
@@ -328,14 +333,17 @@ class GmailSource:
                 )
             raise
 
-    def _fetch_initial(self) -> tuple[list[Message], str]:
-        """First run bounded by lookback window."""
+    def _fetch_initial(self, limit: int | None = None) -> tuple[list[Message], str]:
+        """First run bounded by lookback window, fetch cap, and latency budget."""
+        effective_limit = limit if limit is not None else self.fetch_limit
+        start_time = time.monotonic()
         cutoff = datetime.now(UTC) - timedelta(days=self.lookback_days)
         after_epoch = int(cutoff.timestamp())
 
         q = f"({self.query}) after:{after_epoch}" if self.query else f"after:{after_epoch}"
+        max_results = min(max(effective_limit, 1), 100)
         list_resp = self._request(
-            f"/users/{self.user_id}/messages", params={"q": q, "maxResults": 100}
+            f"/users/{self.user_id}/messages", params={"q": q, "maxResults": max_results}
         )
         message_summaries = list_resp.get("messages", [])
 
@@ -350,6 +358,14 @@ class GmailSource:
         max_history_id = 0
 
         for summary in message_summaries:
+            if len(messages) >= effective_limit:
+                break
+            if time.monotonic() - start_time >= self.latency_budget_seconds:
+                logger.warning(
+                    "Gmail initial fetch exceeded latency budget (%ss)",
+                    self.latency_budget_seconds,
+                )
+                break
             msg_id = summary.get("id")
             if not msg_id:
                 continue
@@ -369,8 +385,12 @@ class GmailSource:
 
         return messages, next_cursor
 
-    def _fetch_incremental(self, cursor: str) -> tuple[list[Message], str]:
-        """Incremental fetch using history.list from stored historyId."""
+    def _fetch_incremental(
+        self, cursor: str, limit: int | None = None
+    ) -> tuple[list[Message], str]:
+        """Incremental fetch using history.list from stored historyId under caps and budget."""
+        effective_limit = limit if limit is not None else self.fetch_limit
+        start_time = time.monotonic()
         try:
             history_resp = self._request(
                 f"/users/{self.user_id}/history",
@@ -388,50 +408,75 @@ class GmailSource:
                     cursor,
                     err.code,
                 )
-                return self._fetch_initial()
+                return self._fetch_initial(limit=limit)
             raise
         except Exception as err:
             # Handle HTTP 404 in custom mock clients
             err_code = getattr(err, "code", None) or getattr(err, "status_code", None)
             if err_code in (404, 400):
-                return self._fetch_initial()
+                return self._fetch_initial(limit=limit)
             raise
 
-        next_cursor = str(history_resp.get("historyId", cursor))
         history_records = history_resp.get("history", [])
 
-        # Collect unique message IDs added
+        # Process record by record so cursor only advances past completed records
+        messages: list[Message] = []
+        current_cursor = cursor
         seen_ids: set[str] = set()
-        ordered_ids: list[str] = []
+        limit_reached = False
 
         for record in history_records:
+            record_id = str(record.get("id", ""))
+            record_msg_ids: list[str] = []
             for added in record.get("messagesAdded", []):
                 msg_info = added.get("message", {})
                 m_id = msg_info.get("id")
                 if m_id and m_id not in seen_ids:
                     seen_ids.add(m_id)
-                    ordered_ids.append(m_id)
+                    record_msg_ids.append(m_id)
             for msg_info in record.get("messages", []):
                 m_id = msg_info.get("id")
                 if m_id and m_id not in seen_ids:
                     seen_ids.add(m_id)
-                    ordered_ids.append(m_id)
+                    record_msg_ids.append(m_id)
 
-        messages: list[Message] = []
-        for msg_id in ordered_ids:
-            try:
-                msg_data = self._request(
-                    f"/users/{self.user_id}/messages/{msg_id}", params={"format": "full"}
-                )
-                if matches_query(msg_data, self.query):
-                    messages.append(parse_gmail_message(msg_data))
-            except Exception as exc:
-                logger.warning("Failed to fetch Gmail message %s: %s", msg_id, exc)
+            for msg_id in record_msg_ids:
+                if len(messages) >= effective_limit:
+                    limit_reached = True
+                    break
+                if time.monotonic() - start_time >= self.latency_budget_seconds:
+                    logger.warning(
+                        "Gmail incremental fetch exceeded latency budget (%ss)",
+                        self.latency_budget_seconds,
+                    )
+                    limit_reached = True
+                    break
+                try:
+                    msg_data = self._request(
+                        f"/users/{self.user_id}/messages/{msg_id}", params={"format": "full"}
+                    )
+                    if matches_query(msg_data, self.query):
+                        messages.append(parse_gmail_message(msg_data))
+                except Exception as exc:
+                    logger.warning("Failed to fetch Gmail message %s: %s", msg_id, exc)
+
+            if limit_reached:
+                break
+            if record_id:
+                current_cursor = record_id
+
+        if not limit_reached:
+            next_cursor = str(history_resp.get("historyId", current_cursor))
+        else:
+            next_cursor = current_cursor
 
         return messages, next_cursor
 
-    def fetch_since(self, cursor: str | None) -> tuple[list[Message], str]:
+    def fetch_since(
+        self, cursor: str | None, limit: int | None = None
+    ) -> tuple[list[Message], str]:
         """Fetch messages since cursor. Returns new messages and next historyId cursor."""
         if not cursor:
-            return self._fetch_initial()
-        return self._fetch_incremental(cursor)
+            return self._fetch_initial(limit=limit)
+        return self._fetch_incremental(cursor, limit=limit)
+
