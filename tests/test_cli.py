@@ -94,7 +94,6 @@ def test_init_creates_config_and_db(tmp_path):
 
 
 def test_stub_commands_exit_nonzero(capsys):
-    assert cli.main(["--dry-run", "pending"]) == 2
     assert cli.main(["auth", "google"]) == 2
     assert "not implemented" in capsys.readouterr().err
 
@@ -315,3 +314,372 @@ def test_cli_run_daemon_loop(tmp_path, monkeypatch):
         cli.main(["run"])
 
     assert len(sleeps) == 1
+
+
+def test_cli_pending_list_and_empty(tmp_path, capsys):
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    # Empty queue
+    assert cli.main(["pending"]) == 0
+    assert "no pending candidates" in capsys.readouterr().out
+
+    # Add items to pending
+    from cuecal import db
+    from cuecal.models import MeetingCandidate
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(
+        title="Uncertain Sync",
+        confidence=0.55,
+        meeting_id="zoom_555",
+        join_url="https://zoom.us/j/555",
+        source_ref="slack:C123",
+    )
+    db.add_pending(
+        conn,
+        candidate=cand,
+        reason="low confidence (0.55 < 0.85)",
+        source_snippet="Sync later? https://zoom.us/j/555",
+        source="slack",
+        message_id="m123",
+    )
+    conn.close()
+
+    assert cli.main(["pending"]) == 0
+    out = capsys.readouterr().out
+    assert "1 pending candidate:" in out
+    assert "[1] Uncertain Sync" in out
+    assert "Confidence: 0.55" in out
+    assert "Reason:     low confidence (0.55 < 0.85)" in out
+    assert "Join URL:   https://zoom.us/j/555" in out
+    assert "Source:     slack" in out
+    assert "Snippet:    Sync later? https://zoom.us/j/555" in out
+
+
+def test_cli_approve_success_and_dry_run(tmp_path, monkeypatch, capsys):
+    from cuecal import db
+    from cuecal.models import MeetingCandidate
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    created_events = []
+
+    class DummySink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            created_events.append(candidate)
+            return "sink_event_999"
+
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: DummySink() if kind == "sinks" else None,
+    )
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(
+        title="Budget Planning",
+        confidence=0.6,
+        meeting_id="meet_budget",
+        join_url="https://meet.google.com/abc-defg-hij",
+        source_ref="gmail:thread_123",
+        attendees=["alice@example.com", "bob@example.com"],
+    )
+    pid = db.add_pending(
+        conn,
+        candidate=cand,
+        reason="low confidence",
+        source="gmail",
+        message_id="msg_bg",
+    )
+    conn.close()
+
+    # Dry-run approve
+    assert cli.main(["--dry-run", "approve", str(pid)]) == 0
+    out = capsys.readouterr().out
+    assert "dry-run: would approve #1 and create event for 'Budget Planning'" in out
+    assert len(created_events) == 0
+
+    # Non-dry-run approve
+    assert cli.main(["approve", str(pid)]) == 0
+    out = capsys.readouterr().out
+    assert "approved #1: created event sink_event_999 (Budget Planning)" in out
+    assert len(created_events) == 1
+    assert created_events[0].title == "Budget Planning"
+    assert created_events[0].meeting_id == "meet_budget"
+    assert created_events[0].source_ref == "gmail:thread_123"
+    assert created_events[0].attendees == ["alice@example.com", "bob@example.com"]
+
+    # Verify event_link and status updated in DB
+    conn = db.connect(tmp_path / "state.db")
+    item = db.get_pending(conn, pid)
+    assert item["status"] == "approved"
+    link_row = conn.execute(
+        "SELECT sink_event_id FROM event_link WHERE meeting_id = 'meet_budget'"
+    ).fetchone()
+    assert link_row is not None
+    assert link_row[0] == "sink_event_999"
+    conn.close()
+
+    # Approving already approved candidate fails
+    assert cli.main(["approve", str(pid)]) == 1
+    assert "error: pending candidate #1 not found" in capsys.readouterr().err
+
+
+def test_cli_reject_success_and_dry_run(tmp_path, capsys):
+    from cuecal import db
+    from cuecal.models import MeetingCandidate
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(title="Spam Meeting", confidence=0.4)
+    pid = db.add_pending(conn, candidate=cand, reason="spam")
+    conn.close()
+
+    # Dry run reject
+    assert cli.main(["--dry-run", "reject", str(pid)]) == 0
+    assert "dry-run: would reject candidate #1" in capsys.readouterr().out
+
+    conn = db.connect(tmp_path / "state.db")
+    assert db.get_pending(conn, pid)["status"] == "pending"
+    conn.close()
+
+    # Non dry run reject
+    assert cli.main(["reject", str(pid)]) == 0
+    assert "rejected #1: Spam Meeting" in capsys.readouterr().out
+
+    conn = db.connect(tmp_path / "state.db")
+    assert db.get_pending(conn, pid)["status"] == "rejected"
+    conn.close()
+
+    # Rejecting nonexistent candidate fails
+    assert cli.main(["reject", "999"]) == 1
+    assert "error: pending candidate #999 not found" in capsys.readouterr().err
+
+
+def test_cli_edit_flags_and_approve(tmp_path, monkeypatch, capsys):
+    from cuecal import db
+    from cuecal.models import MeetingCandidate
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    created_events = []
+
+    class DummySink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            created_events.append(candidate)
+            return "evt_edited"
+
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: DummySink() if kind == "sinks" else None,
+    )
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(title="Draft Meeting", confidence=0.5)
+    pid = db.add_pending(conn, candidate=cand)
+    conn.close()
+
+    # Dry-run edit
+    assert (
+        cli.main(
+            [
+                "--dry-run",
+                "edit",
+                str(pid),
+                "--title",
+                "Correct Title",
+                "--start",
+                "2026-10-15T14:00:00Z",
+            ]
+        )
+        == 0
+    )
+    assert "dry-run: would update pending candidate #1" in capsys.readouterr().out
+
+    # Non-dry-run edit with flags
+    assert (
+        cli.main(
+            [
+                "edit",
+                str(pid),
+                "--title",
+                "Correct Title",
+                "--start",
+                "2026-10-15T14:00:00Z",
+                "--end",
+                "2026-10-15T15:00:00Z",
+                "--tz",
+                "UTC",
+                "--join-url",
+                "https://zoom.us/j/999",
+                "--meeting-id",
+                "999",
+                "--passcode",
+                "pass123",
+                "--attendees",
+                "alice@example.com, bob@example.com",
+            ]
+        )
+        == 0
+    )
+    assert "updated pending candidate #1" in capsys.readouterr().out
+
+    conn = db.connect(tmp_path / "state.db")
+    item = db.get_pending(conn, pid)
+    updated_cand = MeetingCandidate.from_json(item["candidate_json"])
+    assert updated_cand.title == "Correct Title"
+    assert updated_cand.start.isoformat().startswith("2026-10-15T14:00:00")
+    assert updated_cand.end.isoformat().startswith("2026-10-15T15:00:00")
+    assert updated_cand.tz == "UTC"
+    assert updated_cand.join_url == "https://zoom.us/j/999"
+    assert updated_cand.meeting_id == "999"
+    assert updated_cand.passcode == "pass123"
+    assert updated_cand.attendees == ["alice@example.com", "bob@example.com"]
+    conn.close()
+
+    # Edit with --approve flag
+    assert cli.main(["edit", str(pid), "--title", "Final Approved Title", "--approve"]) == 0
+    out = capsys.readouterr().out
+    assert "updated pending candidate #1" in out
+    assert "approved #1: created event evt_edited (Final Approved Title)" in out
+    assert len(created_events) == 1
+    assert created_events[0].title == "Final Approved Title"
+
+
+def test_cli_edit_interactive(tmp_path, monkeypatch, capsys):
+    from cuecal import db
+    from cuecal.models import MeetingCandidate
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(title="Old Title", confidence=0.5)
+    pid = db.add_pending(conn, candidate=cand)
+    conn.close()
+
+    # Simulate user entering new title and pressing Enter for other prompts
+    inputs = iter([
+        "New Interactive Title",  # title
+        "",  # start
+        "",  # end
+        "",  # tz
+        "",  # join_url
+        "",  # meeting_id
+        "",  # passcode
+        "",  # attendees
+        "n",  # approve?
+    ])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    assert cli.main(["edit", str(pid)]) == 0
+    assert "updated pending candidate #1" in capsys.readouterr().out
+
+    conn = db.connect(tmp_path / "state.db")
+    item = db.get_pending(conn, pid)
+    updated_cand = MeetingCandidate.from_json(item["candidate_json"])
+    assert updated_cand.title == "New Interactive Title"
+    conn.close()
+
+
+def test_cli_run_routes_low_confidence_to_pending(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal import db
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+
+    class DummySource:
+        name = "dummy"
+
+        def fetch_since(self, cursor):
+            msg1 = Message(
+                id="msg_low",
+                source="dummy",
+                sender="alice",
+                ts=datetime.now(),
+                text="Low confidence text",
+            )
+            msg2 = Message(
+                id="msg_high",
+                source="dummy",
+                sender="bob",
+                ts=datetime.now(),
+                text="High confidence text",
+            )
+            return [msg1, msg2], "next_cursor"
+
+    created_events = []
+
+    class DummySink:
+        name = "dummy-sink"
+
+        def create_event(self, candidate):
+            created_events.append(candidate)
+            return f"evt_{candidate.meeting_id}"
+
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummySource
+        if kind == "sinks":
+            return DummySink()
+        raise KeyError(name)
+
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+
+    def fake_extract(msg):
+        if msg.id == "msg_low":
+            return MeetingCandidate(
+                confidence=0.6,
+                meeting_id="mtg_low",
+                title="Low Conf Meeting",
+                source_ref=msg.id,
+            )
+        return MeetingCandidate(
+            confidence=0.95,
+            meeting_id="mtg_high",
+            title="High Conf Meeting",
+            source_ref=msg.id,
+        )
+
+    monkeypatch.setattr("cuecal.extract.extract", fake_extract)
+
+    config_path = tmp_path / "config.toml"
+    with open(config_path) as f:
+        content = f.read()
+    with open(config_path, "w") as f:
+        f.write(content.replace("sources = []", 'sources = ["dummy"]'))
+
+    assert cli.main(["run", "--once"]) == 0
+
+    conn = db.connect(tmp_path / "state.db")
+
+    # High confidence was written to sink and event_link recorded
+    assert len(created_events) == 1
+    link = conn.execute(
+        "SELECT sink_event_id FROM event_link WHERE meeting_id = 'mtg_high'"
+    ).fetchone()
+    assert link is not None
+    assert link[0] == "evt_mtg_high"
+
+    # Low confidence was routed to pending table
+    pending_items = db.list_pending(conn)
+    assert len(pending_items) == 1
+    p = pending_items[0]
+    assert p["message_id"] == "msg_low"
+    assert p["confidence"] == 0.6
+    assert "low confidence" in p["reason"]
+    assert p["source_snippet"] == "Low confidence text"
+    cand_loaded = MeetingCandidate.from_json(p["candidate_json"])
+    assert cand_loaded.title == "Low Conf Meeting"
+    conn.close()
+

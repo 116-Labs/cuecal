@@ -102,3 +102,70 @@ def test_service_run_and_stat_helpers(tmp_path):
     tier_counts = db.get_counts_by_tier(conn)
     assert tier_counts.get("regex") == 2
     assert tier_counts.get("deterministic") == 0
+
+
+def test_pending_crud_helpers(tmp_path):
+    from cuecal.models import MeetingCandidate
+
+    conn = db.connect(tmp_path / "state.db")
+    assert db.list_pending(conn) == []
+
+    cand = MeetingCandidate(
+        title="Sync Chat",
+        confidence=0.6,
+        meeting_id="m123",
+        join_url="https://zoom.us/j/123",
+        source_ref="slack:123",
+    )
+
+    pid = db.add_pending(
+        conn,
+        candidate=cand,
+        reason="Low confidence (0.60 < 0.85)",
+        source_snippet="hey let's sync",
+        source="slack",
+        message_id="msg1",
+    )
+    assert pid > 0
+
+    item = db.get_pending(conn, pid)
+    assert item is not None
+    assert item["id"] == pid
+    assert item["source"] == "slack"
+    assert item["message_id"] == "msg1"
+    assert item["confidence"] == 0.6
+    assert item["reason"] == "Low confidence (0.60 < 0.85)"
+    assert item["source_snippet"] == "hey let's sync"
+    assert item["status"] == "pending"
+
+    loaded_cand = MeetingCandidate.from_json(item["candidate_json"])
+    assert loaded_cand.title == "Sync Chat"
+    assert loaded_cand.confidence == 0.6
+    assert loaded_cand.meeting_id == "m123"
+
+    pending_list = db.list_pending(conn)
+    assert len(pending_list) == 1
+    assert pending_list[0]["id"] == pid
+
+    # Update candidate
+    cand.title = "Updated Sync"
+    assert db.update_pending(conn, pid, candidate_json=cand.to_json()) is True
+    item = db.get_pending(conn, pid)
+    assert MeetingCandidate.from_json(item["candidate_json"]).title == "Updated Sync"
+
+    # Reject
+    assert db.reject_pending(conn, pid) is True
+    assert db.get_pending(conn, pid)["status"] == "rejected"
+    assert db.list_pending(conn, status="pending") == []
+    assert len(db.list_pending(conn, status=None)) == 1
+
+    # Add another and approve
+    pid2 = db.add_pending(
+        conn,
+        candidate=cand,
+        reason="Validation failed",
+    )
+    assert db.approve_pending(conn, pid2) is True
+    assert db.get_pending(conn, pid2)["status"] == "approved"
+    assert db.list_pending(conn, status="pending") == []
+
