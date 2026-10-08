@@ -5,7 +5,10 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from cuecal.models import MeetingCandidate
 
 # Append-only. Index + 1 is the schema version each entry brings the DB to.
 MIGRATIONS: list[str] = [
@@ -54,6 +57,12 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (run_id) REFERENCES service_run (id)
     );
+    """,
+    """
+    ALTER TABLE pending ADD COLUMN confidence REAL;
+    ALTER TABLE pending ADD COLUMN reason TEXT;
+    ALTER TABLE pending ADD COLUMN source_snippet TEXT;
+    ALTER TABLE pending ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
     """,
 ]
 
@@ -214,3 +223,136 @@ def record_event_link(
         (meeting_id, sink_name, sink_event_id),
     )
     conn.commit()
+
+
+def add_pending(
+    conn: sqlite3.Connection,
+    *,
+    candidate: MeetingCandidate | None = None,
+    candidate_json: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
+    source_snippet: str | None = None,
+    source: str = "",
+    message_id: str = "",
+) -> int:
+    if candidate is not None:
+        if candidate_json is None:
+            candidate_json = candidate.to_json()
+        if confidence is None:
+            confidence = candidate.confidence
+        if not source and candidate.source_ref:
+            source = candidate.source_ref
+    if candidate_json is None:
+        raise ValueError("candidate or candidate_json is required")
+
+    cursor = conn.execute(
+        """
+        INSERT INTO pending (
+            source, message_id, candidate_json, confidence, reason, source_snippet, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        """,
+        (source, message_id, candidate_json, confidence, reason, source_snippet),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def get_pending(conn: sqlite3.Connection, pending_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, source, message_id, candidate_json, confidence, reason, source_snippet, status,
+               created_at
+        FROM pending
+        WHERE id = ?
+        """,
+        (pending_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "source": row[1],
+        "message_id": row[2],
+        "candidate_json": row[3],
+        "confidence": row[4],
+        "reason": row[5],
+        "source_snippet": row[6],
+        "status": row[7],
+        "created_at": row[8],
+    }
+
+
+def list_pending(
+    conn: sqlite3.Connection, *, status: str | None = "pending"
+) -> list[dict[str, Any]]:
+    if status is not None:
+        rows = conn.execute(
+            """
+            SELECT id, source, message_id, candidate_json, confidence, reason,
+                   source_snippet, status, created_at
+            FROM pending
+            WHERE status = ?
+            ORDER BY id ASC
+            """,
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, source, message_id, candidate_json, confidence, reason,
+                   source_snippet, status, created_at
+            FROM pending
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "source": r[1],
+            "message_id": r[2],
+            "candidate_json": r[3],
+            "confidence": r[4],
+            "reason": r[5],
+            "source_snippet": r[6],
+            "status": r[7],
+            "created_at": r[8],
+        }
+        for r in rows
+    ]
+
+
+def update_pending(
+    conn: sqlite3.Connection,
+    pending_id: int,
+    *,
+    candidate_json: str | None = None,
+    status: str | None = None,
+) -> bool:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if candidate_json is not None:
+        clauses.append("candidate_json = ?")
+        params.append(candidate_json)
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    if not clauses:
+        return False
+    params.append(pending_id)
+    cursor = conn.execute(
+        f"UPDATE pending SET {', '.join(clauses)} WHERE id = ?",
+        params,
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def approve_pending(conn: sqlite3.Connection, pending_id: int) -> bool:
+    return update_pending(conn, pending_id, status="approved")
+
+
+def reject_pending(conn: sqlite3.Connection, pending_id: int) -> bool:
+    return update_pending(conn, pending_id, status="rejected")
+
