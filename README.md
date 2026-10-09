@@ -48,19 +48,34 @@ Nothing is tied to one person's setup: accounts, calendars, sources, models and 
 
 The v1 epic is [#1](https://github.com/116-Labs/cuecal/issues/1). Beyond v1: reschedule and cancellation sync ([#12](https://github.com/116-Labs/cuecal/issues/12)), mirroring secondary calendars into the target calendar ([#17](https://github.com/116-Labs/cuecal/issues/17)), and provisioning a preferred conference link and propagating it to Zoho Calendar ([#20](https://github.com/116-Labs/cuecal/issues/20)).
 
-## Quickstart (from source)
+## Quickstart
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+
+### 1. Install as a standalone CLI command (Recommended)
 
 ```sh
 git clone https://github.com/116-Labs/cuecal.git
 cd cuecal
-uv sync
-uv run cuecal init     # writes the default config and creates the state DB
-uv run cuecal doctor   # reports config, DB, keyring backend and registered plugins
+uv tool install --editable .
 ```
 
-Working today: `init`, `doctor`. Stubs until their issues land: `auth <provider>`, `run [--once]`, `pending`, `service install|uninstall`. Every command accepts `--dry-run` and `-v/--verbose`.
+This installs `cuecal` directly onto your `PATH`. You can then run commands directly:
+
+```sh
+cuecal init     # writes the default config and creates the state DB
+cuecal doctor   # reports config, DB, keyring backend and registered plugins
+```
+
+### 2. Or run via `uv run` (Development)
+
+```sh
+uv sync
+uv run cuecal init
+uv run cuecal doctor
+```
+
+Working today: `init`, `doctor`, `auth slack`, `run --once`. Stubs until their issues land: `auth google` (#51), `pending` (#40), `service install|uninstall` (#11). Every command accepts `--dry-run` and `-v/--verbose`.
 
 ### Config and data
 
