@@ -8,3 +8,5 @@ dist/
 .gaal/runs/
 .codegraph/
 .gemini/
+.claude/skills/gaal-*/
+.agents/skills/gaal-*/
