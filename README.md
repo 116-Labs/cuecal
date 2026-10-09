@@ -97,3 +97,5 @@ CI runs both gates on every push and pull request. Commits follow [Conventional 
 ## License
 
 CueCal is pre-release and not yet licensed for reuse. The source is visible so the project can be developed in the open, but no license is granted yet: all rights are reserved until the first shareable version ships with an open-source license.
+
+Gaal renders its skills (`.claude/skills/gaal-*`, `.agents/skills/gaal-*`) from its templates when it dispatches a run, so they are not committed here; `gaal skills render` writes them locally, to read or to run one by hand.
