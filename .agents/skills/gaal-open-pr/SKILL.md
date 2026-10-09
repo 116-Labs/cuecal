@@ -1,487 +1,420 @@
 ---
 name: gaal-open-pr
-description: Publishes a finished single-commit branch in 116-Labs/cuecal as one pull request against main, or against an open stacked parent branch, that links its GitHub issue. It then writes the run result to result.json in the run directory. Use it when a dispatch or the user asks for the open-pr step (open, send or publish a PR) for work that is already implemented, with the branch named in the dispatch or checked out. It checks that the branch is not a merged PR's old branch, reads every changed file for private content, runs the profile gates (uv run ruff check . and uv run pytest), collapses the branch in place to one Conventional Commits commit, checks base drift, pushes with an explicit lease, and creates or updates the PR. Do not use it to implement an issue (gaal-implement), revise a PR after review (gaal-revise-pr), review a PR (gaal-review-pr), merge or deploy. When no commit is ahead of the base, the run ends failed with "nothing to propose".
+description: Publishes a finished branch in 116-Labs/cuecal as one pull request against `main`, or against an open stacked parent branch, linked to the branch's GitHub issue. Before it pushes anything, it checks that the branch is not the old branch of a merged PR and checks the remote side. It runs `uv sync --locked`, then the required gates `uv run ruff check .` and `uv run pytest`. It collapses the branch in place to one Conventional Commits commit with no attribution, checks base drift and pushes with an explicit lease through the repository's verification hook. It then creates or updates the PR, checks mergeability and writes the run result to `result.json` in the run directory. Use it when a dispatch or the user asks for the open-pr step ("open a pull request for branch `<branch>`", "open / send / publish a PR") for work that is already implemented. Do not use it to implement an issue (gaal-implement), revise a PR after review (gaal-revise-pr), review a PR (gaal-review-pr), merge, publish or deploy.
 ---
-<!-- gaal-stamp blueprint=open-pr@1.6.0 shared=1.5.0 profile=833de6ae33df6d68 generated=2026-10-08 core=b5e6128298936ac3 forbidden=f9de5558e585a82c content=5fdbd9855ef213d3 -->
+<!-- gaal-stamp blueprint=open-pr@1.6.0 shared=1.5.0 profile=6f85855df888e336 generated=2026-10-09 core=b5e6128298936ac3 forbidden=f9de5558e585a82c content=6cda92ca9f2a10e1 -->
 
 # gaal-open-pr
 
-This skill publishes a finished change as a pull request on `116-Labs/cuecal`. The pushed branch holds one hand-written Conventional Commits commit, and the PR body links the issue with the same link as the commit. That gives reviewers and the squash merge a clean, traceable unit. It implements blueprint `open-pr` version `1.6.0`.
+This skill publishes a finished change in `116-Labs/cuecal` as a pull request. The pushed branch holds one hand-written Conventional Commits commit and the PR body links the issue, so reviewers and the squash merge get a clean unit that can be traced back to its issue. Blueprint `open-pr`, version `1.6.0`.
 
-## Repository facts (from `.gaal/project.yml`)
+## Run context and command rules
 
-- Repo: `116-Labs/cuecal` (private). Default branch: `main`. Tracker: GitHub issues.
-- Gates, run in this order, both required:
+- In every command below, `<run-dir>` stands for the literal path of the run directory from the run context (the value of GAAL_RUN_DIR). Write that path out in full and never type the variable name in a command. Take the run id (the value of GAAL_RUN_ID) from the run context too; it is written only into `result.json`.
+- Fill placeholders such as `<branch>`, `<base>`, `<sha>`, `<pr>` and `<n>` by hand, with the literal values you read earlier. Never use shell variables, `$(…)`, backticks or a `NAME=value` prefix in a command.
+- Run one command per call, with no `&&`, `;` or `|`. Read each command's exit code and output directly. Never let a filter or guard hide whether a command failed (`status-preserved`).
+- Apart from the file tools, only these commands are allowed: `git`, `gh`, `mkdir`, `mv`, `cp`, `ls`, `cat`, `date`, `pwd` (with any arguments), and these three, exactly as written with nothing added: `uv sync --locked`, `uv run ruff check .`, `uv run pytest`. Run them in this checkout. The work happens in place, so no throwaway worktree is needed.
+- Write every file (commit message, PR body, GraphQL query, `result.json.tmp`) with the file-writing tool, never through shell redirection. Pass each one by its path: `git commit -F <file>`, `gh pr create --body-file <file>`, `gh pr edit --body-file <file>`, `-F query=@<file>` for `gh api graphql`.
+- Quote every glob, and every API path that contains `?`, `&` or `^`.
+- Scratch files go in `<run-dir>/scratch`, never in `/tmp`. Nothing under `<run-dir>` is ever staged.
+- Never skip or redirect the repository's verification (`bypass-hook`). That means no `--no-verify` (or its short commit form), no `--no-gpg-sign`, no change to where git looks for hooks, no hook manager switched off, and no edit, move or restore of a hook file or `.git/config`. Never merge, push or rewrite with admin privileges (`admin-bypass`). To find the hooks directory, run `git rev-parse --git-path hooks`.
+- A force-push always takes an explicit lease on the inspected sha, `--force-with-lease=<branch>:<sha>` (`bare-force-push`). Plain force flags are never used. Stage only by explicit path. Never stage everything wholesale and never commit all tracked changes in one sweep (`explicit-staging`).
+- Write no machine-specific paths, private scripts or secrets into any file or command (`machine-specific-paths`).
+
+## Profile facts used by this skill
+
+- Repo: `116-Labs/cuecal`, which is public. Default branch: `main`. Tracker: GitHub issues.
+- Install: `uv sync --locked`, run before the gates every time (`install-before-gates`).
+- Gates, both required, run in this order:
   - `lint`: `uv run ruff check .`
   - `test`: `uv run pytest`
-- Install: the profile names no `install` command, so this run installs nothing. It runs the gates in the checkout itself, using the checkout's existing environment. Never run the gates in a throwaway worktree, because a worktree has no installed dependencies.
-- Preflight: the profile lists no preflight checks (`preflight: []`). No scanner runs, and no preflight entry ever goes into `gates`. The judgement pass therefore covers every changed file.
-- Advisory checks: none named.
-- Branch prefix: `gaal/`. Commits: single commit (`single_commit: true`), Conventional Commits, `attribution: none`. Never add `Co-Authored-By`, "Generated with" lines, a provenance section or any other AI or agent attribution to the commit or the PR body.
-- Merge: squash, no merge queue, no auto-merge, `message_source: commits`. Because the merge takes its message from the commits, the collapse regime is active.
-- Review: `required_approvals: 1`. `reviewers: []`. `request_when_empty` is absent, so it means `none`. `review.dismiss_stale_approvals` and `review.require_last_push_approval` are both absent, so:
-  - assume any push invalidates approvals;
-  - count an approval only when it is on the current head.
-- Reviews come from the separate review identity `116-labs-gaal-review[bot]`. Pushes come from `116-labs-gaal-push[bot]`.
-- Stacking: `stacking` is absent. A stacked PR (one given a base override) takes its parent branch as its base until the parent merges. No stacking tool exists, so publish stacks with plain `git` and `gh`.
-- Limits: `implement_attempts: 3`, `revise_rounds: 3`, `review_rounds: 2`. This step consumes none of them. It makes one pass and records `attempts: 1`. Within that pass:
-  - at most one second push, after the after-push check;
-  - at most five reads of `mergeable` while it is `UNKNOWN`.
-
-## Headless command rules
-
-- Run only commands that start with `git`, `gh`, `mkdir`, `mv`, `cp`, `ls`, `cat`, `date` or `pwd`, plus exactly `uv run ruff check .` and `uv run pytest`, with nothing added to either.
-- Run one command per call. Never chain with `&&`, `;` or `|`. Never use `$VAR`, `${VAR}`, `$(…)`, backticks or `NAME=value` prefixes.
-- `<run-dir>` stands for the literal run directory path given in the run context (the value of `GAAL_RUN_DIR`). Take the run id the same way, from the run context (the value of `GAAL_RUN_ID`). Never expand either variable in a command.
-- Other placeholders such as `<branch>`, `<base>`, `<sha>`, `<pr>` and `<n>` stand for literal values you read earlier. Substitute them before running the command.
-- Scratch files go in `<run-dir>/scratch`. Create it first with `mkdir -p <run-dir>/scratch`.
-- Write every file with the file-writing tool, never through shell redirection. This covers commit messages, PR bodies and `result.json.tmp`.
-- Pass commit messages with `git commit -F <file>` and PR bodies with `--body-file <file>`, never inline.
-- Quote every URL that contains `?` or `&`, and every glob.
-- Read the time with `date -u +%Y-%m-%dT%H:%M:%SZ`.
-- Time each gate with `date -u +%s` run just before and just after it, as separate commands. `duration_ms` is the difference times 1000.
-- An exit status is never lost (`status-preserved`). Read the exit code of every command and act on it.
-- For `git merge-base --is-ancestor`:
-  - exit 0 means yes;
-  - exit 1 means no;
-  - any other exit is a failure.
-- If you need the hooks directory, run `git rev-parse --git-path hooks`. Never write a command that names the hooks-path config key, and never edit, move or restore hook files or `.git/config`.
+- Preflight: none. No check declares `covers`, so the judgement pass reads every changed file in full. The profile names no advisory checks, and none run.
+- Commits: one commit per PR, Conventional Commits (`type(scope): subject`), attribution `none`. The commit and the PR body carry no AI attribution, no agent `Co-Authored-By` trailer and no provenance section (`attribution-policy`).
+- Branch prefix: `gaal/`.
+- Merge:
+  - Method `squash`, no merge queue, `auto: true`.
+  - `message_source: commits`, so the squash message comes from the single commit and the collapse routine applies. This skill does not merge and does not turn on auto-merge.
+- Review:
+  - `required_approvals: 1`.
+  - `dismiss_stale_approvals: true` and `require_last_push_approval: false`. A push dismisses approvals. An approval of an earlier commit that has not been dismissed still counts.
+  - Code-owner reviews are required (`code_owner_reviews: true`), unresolved threads block merge, and the required checks are `test` and `zizmor`.
+  - `reviewers: []`, and `request_when_empty` is absent, which means `none`.
+  - Reviews come from the separate review identity `116-labs-gaal-review[bot]`. Pushes are made as `116-labs-gaal-push[bot]`.
+- Stacking: not configured, so `stacking.base` is `parent`. A stacked PR (base override) takes its parent branch as its base until the parent merges, then `main`. No stacking tool is set, so a stack is published with plain `git` and `gh`.
+- Limits: `implement_attempts: 3`, `revise_rounds: 3`, `review_rounds: 2`. Other steps use those. This step's own bounds are 1 first push, at most 1 second push after an after-push rebase, and at most 5 mergeability reads per check. Record `attempts: 1`.
 
 ## Steps
 
-Record `started_at` first: `date -u +%Y-%m-%dT%H:%M:%SZ`. Then `mkdir -p <run-dir>/scratch`.
+"End `failed`", "end `needs-human`" or "end `done`" anywhere below means stop the current work and go straight to the **run result** step. The run result is written on every exit path.
 
-Keep these values in mind as you go:
+### 1. Start, then resolve the branch, base and issue
 
-- branch, base and issue;
-- the inspected remote sha;
-- the pre-collapse sha and pre-collapse tree;
-- the base sha fetched by the drift check;
-- the sha of each push;
-- PR number;
-- every gate run on the current tree.
+1. Run `date -u +%Y-%m-%dT%H:%M:%SZ` and keep the value as `started_at`.
+2. Run `mkdir -p <run-dir>/scratch`.
+3. Run `git rev-parse --git-path hooks`, then `ls <hooks-dir>`, and note which local hooks exist (such as `pre-commit` or `pre-push`). The report cites them for `hook-ran`. Never change them.
+4. **Get onto the branch.**
+   - When the dispatch names a branch:
+     1. Check for it locally with `git rev-parse --verify --quiet refs/heads/<branch>` and on the remote with `git ls-remote origin refs/heads/<branch>`.
+     2. If it exists locally, run `git switch <branch>`.
+     3. If it exists only on the remote, run `git fetch origin <branch>`, then `git switch <branch>`. This creates a local branch that tracks `origin/<branch>`.
+     4. If it exists nowhere, end `failed` naming the branch.
+     5. Never create a new branch for a dispatched name.
+   - Without a dispatched branch, use the current branch (`git branch --show-current`). If that branch is `main` and holds commits ahead of `origin/main`, move the work off the base (`base-untouched`):
+     1. Read `git rev-parse main` as `<old-main>` and `git rev-parse origin/main` as `<origin-main>`.
+     2. Run `git branch <new-branch>`, with a name under the prefix such as `gaal/<n>-<slug>`.
+     3. Run `git switch <new-branch>`.
+     4. Run `git update-ref refs/heads/main <origin-main> <old-main>`.
+   - Never commit or push to `main`.
+5. **Resolve the base.** Without an override, `<base>` is `main`. A base override (a stacked PR) names the parent branch:
+   1. Look up the parent PR with `gh pr list --repo 116-Labs/cuecal --head <override> --state all --json number,state,mergedAt,headRefOid`.
+   2. If the parent PR has merged:
+      - Run `git fetch origin main` only. Never run `git fetch origin <override>`, because the parent branch may have been deleted at merge.
+      - Keep the parent's number as `<parent-n>` and its `headRefOid` as `<old-parent-tip>` for the merged-parent rebase.
+      - From then on, `<base>` is `main` for every step: the merged-PR check, the collapse's merge base and author check, the drift check and the after-push check.
+   3. Otherwise `<base>` is the override.
+   4. Run `git fetch origin <base>`. A lookup or fetch that fails ends `failed` naming it (`fail-closed-reads`).
+6. **Resolve the issue number.** Use the dispatch first. Otherwise take the number from the branch name (`gaal/<n>-…`) or from a link in the commits.
+   1. Read the messages with `git log --format=%B origin/<base>..HEAD`. By the issue-link rule, a link is a line that opens with a closing keyword (`Closes`, `Fixes`, `Resolves` and their forms) or with `Refs #N`. Extract only the numbers.
+   2. Check each candidate with `gh api repos/116-Labs/cuecal/issues/<n> --jq .pull_request`:
+      - `null` means it is an issue.
+      - A 404 answer, or a non-null value (the number is a pull request), means it names no issue.
+      - Any other failure ends `failed` naming the read.
+   3. A number from the dispatch or from a commit-message link that names no issue ends `failed` naming it, with nothing pushed.
+   4. A number taken only from the branch name that names no issue is dropped and noted in the report.
+   5. No issue at all does not block the run. The report notes the missing link.
 
-Every exit below goes to the **run result** step.
+### 2. Check the working tree
 
-### 1. Resolve the repo, branch, base and issue
-
-1. Run `gh repo view --json nameWithOwner` and confirm the answer is `116-Labs/cuecal`. If the read fails, end `failed` naming it (`fail-closed-reads`).
-2. **Branch.**
-   - **When the dispatch names a branch:** switch to it with `git switch <branch>`.
-     - If it exists only on the remote (`git ls-remote origin refs/heads/<branch>` shows it), run `git fetch origin <branch>`, then `git switch --track origin/<branch>`.
-     - If it exists nowhere, end `failed` naming it.
-     - Never create a new branch for a dispatched name. Gaal starts runs on `main`, so a dispatched branch is never the one checked out at the start.
-   - **Only without a dispatched branch:** use the current branch (`git branch --show-current`). If that branch is `main` and holds commits ahead of `origin/main` (`git fetch origin main`, then `git rev-list --count origin/main..HEAD`), protect the base (`base-untouched`):
-     - move the work with `git switch -c gaal/<issue>-<short-slug>`;
-     - reset `main` with `git branch -f main origin/main`.
-   - Never commit to `main` or push it.
-3. **Base.** The base is `main` unless the dispatch gives a base override, which marks a stacked PR.
-   - For an override, look up the parent PR (the PR whose head branch is the override): `gh api --paginate "repos/116-Labs/cuecal/pulls?state=all&head=116-Labs:<override>"`.
-   - **When the parent has merged** (`merged_at` set):
-     - keep its number and its `head.sha` (the old parent tip) for the merged-parent rebase;
-     - fetch only the default branch with `git fetch origin main`, never `git fetch origin <override>`, because the parent branch may have been deleted at merge;
-     - from then on `<base>` is `main` for every step, including the merged-PR check, the collapse's merge base and the drift check.
-   - **While the parent is open:** `<base>` is the override.
-4. **Issue number.** Take it from the first of these that gives one:
-   1. the dispatch;
-   2. a link in a commit message on the branch (`git log --format=%B origin/<base>..HEAD`): a line that opens with a closing keyword (`Closes`, `Fixes`, `Resolves` and their forms) or with `Refs #N`;
-   3. the branch name (`gaal/<N>-…`).
-
-   Extract only the number.
-5. **Check that the number names an issue:** `gh api repos/116-Labs/cuecal/issues/<n> --jq .pull_request`.
-   - Output `null` means it is an issue.
-   - A 404, or a non-null value (the number is a PR), means it names no issue.
-   - Any other failure ends `failed` naming the read (`fail-closed-reads`).
-   - What happens to a number that names no issue depends on where it came from:
-     - from the dispatch or from a commit link: end `failed` naming it, with nothing pushed;
-     - only from the branch name: drop it and note it in the report.
-   - No issue number at all does not block. The report notes the missing link.
-
-### 2. Check the working tree for edits this run did not make
-
-1. Open-pr owns no uncommitted work at the start, so there is nothing for it to commit.
-2. Run `git status --porcelain=v1 --untracked-files=all`.
-   - Untracked (`??`) and ignored files never stop the run, because a harness may write its own settings there.
-   - A **tracked** file with uncommitted changes (staged or unstaged) ends `needs-human` naming the file. This happens before any install or gate, because the gates would otherwise test a tree that is not the one pushed.
-3. Never stage, stash, reset or discard changes this run did not make (`explicit-staging`, `commit-foreign-edits`). Never use `git add -A`, `git add .` or `git commit -a`.
-4. If the run later has to write a file (for example to fix what a hook reports), stage that path alone with `git add -- <path>`, and keep a manifest of every such path.
+1. Run `git status --porcelain=v1 --untracked-files=all`.
+2. This run owns no uncommitted work at the start, so it commits nothing here.
+3. Untracked (`??`) and ignored files never stop the run, because a harness may write its own settings there. Leave them alone.
+4. A tracked file with uncommitted changes ends `needs-human` naming that file, before any install or gate runs. Otherwise the gates would test a tree that is not the one pushed.
+5. Never stage, stash, reset or discard changes this run did not make (`explicit-staging`, `commit-foreign-edits`).
 
 ### 3. Confirm there is something to propose
 
-Run `git fetch origin <base>`, then `git rev-list --count origin/<base>..HEAD`. If the count is 0, end `failed` with reason "nothing to propose".
+Run `git rev-list --count origin/<base>..HEAD`. If the count is 0, end `failed` with "nothing to propose".
 
-### 4. Merged-PR check (before anything is collapsed or pushed)
+### 4. Merged-PR check
 
-A squash-merged branch still looks one commit ahead of the base, and a branch name built from the issue number repeats. So this check looks at PRs in every state and judges the branch by its commits, not its name.
+Before anything is collapsed or pushed, make sure this branch is not the old branch of a PR that already merged. An open-PR lookup after the push cannot tell the two apart, and a squash-merged branch still looks one commit ahead of the base. So look at every state, and judge the branch by its commits, never by its name. A branch scheme built from the issue gives a fresh branch the merged branch's name again, and refusing by name would refuse that branch forever.
 
-1. List the PRs whose head is this branch, in every state: `gh api --paginate "repos/116-Labs/cuecal/pulls?state=all&head=116-Labs:<branch>"`. A failed or truncated listing ends `failed` (`fail-closed-reads`, `complete-listings`). A merged PR reads `closed` with `merged_at` set.
-2. If `git fetch origin <base>` fails, the branch counts as the old one.
-3. For each merged PR, run both checks below. The branch counts as the old one if either check says so.
+1. List every PR whose head is this branch:
 
-**Where it started** (run this check first). Looking only at the merged head's sha misses the most common stale branch:
+   `gh api --paginate 'repos/116-Labs/cuecal/pulls?state=all&head=116-Labs:<branch>&per_page=100' --jq 'map({number, merged_at, merge_commit_sha, head_sha: .head.sha})'`
 
-- review-pr collapses in a throwaway worktree, so the local branch still points at the commit before the fix;
-- a resumed branch that was re-collapsed in place gets a new sha.
-
-The fork point does not change in either case.
-
-1. Run `git merge-base HEAD origin/<base>` and record the result as `<fork-point>`.
-2. Run `git merge-base --is-ancestor <merge_commit_sha> <fork-point>`.
-3. Exit 1 means the branch started before that merge, so it is the old branch.
-
-**Its head.**
-
-1. If `head.sha` is not local (`git cat-file -e <head.sha>^{commit}` fails), run `git fetch origin pull/<number>/head`.
-2. Run `git merge-base --is-ancestor <head.sha> HEAD`.
-3. Exit 0 means the branch holds the merged head, so it is the old branch.
-
-**Fail closed.** Each of these counts as the old branch:
-
-- a missing `merge_commit_sha`;
-- a base or head commit that cannot be fetched;
-- any `--is-ancestor` exit other than 0 or 1.
-
-**Outcome.**
-
-- **Old branch:** end `failed` naming that PR, with nothing pushed. Its work is already in the base, and pushing again would re-submit it.
-- **Passes both checks:** the branch is a fresh branch from the current base that reuses the name, and it proceeds. Record the merged PR's `head.sha` as cleared. The remote branch may have been deleted at merge, in which case the push recreates it. It may also still hold the merged commits, in which case the push replaces them with a lease, never a blind force.
+   A failed or truncated listing ends `failed` (`fail-closed-reads`, `complete-listings`). A merged PR reads `closed` with `merged_at` set.
+2. Run `git fetch origin <base>`. If that fetch fails, treat the branch as the old one.
+3. For each merged PR, run both checks. The branch is the old one when either check says so.
+   - **Where it started (check this first).** The fork point catches the most common stale branch. review-pr collapses in a throwaway worktree, which leaves the local branch on the commit before the fix, and a branch re-collapsed in place gets a new sha. Neither changes the fork point.
+     1. Run `git merge-base HEAD origin/<base>` and keep the result as `<fork-point>`.
+     2. If `merge_commit_sha` is missing, the branch is the old one.
+     3. If `git cat-file -e '<merge_commit_sha>^{commit}'` fails, run `git fetch origin <merge_commit_sha>`. If that fetch fails, the branch is the old one.
+     4. Run `git merge-base --is-ancestor <merge_commit_sha> <fork-point>`:
+        - Exit 0 passes.
+        - Exit 1 means the branch started before that merge, so it is the old branch even with a different head sha.
+        - Any other exit counts as the old branch.
+   - **Its head.**
+     1. If `git cat-file -e '<head_sha>^{commit}'` fails, run `git fetch origin pull/<number>/head`. If that fetch fails, the branch is the old one.
+     2. Run `git merge-base --is-ancestor <head_sha> HEAD`:
+        - Exit 1 passes.
+        - Exit 0 means the branch holds the merged head, so it is the old branch.
+        - Any other exit counts as the old branch.
+4. If the branch is the old one, end `failed` naming that PR, with nothing pushed. Its work is already in the base, and pushing the branch again would re-submit it.
+5. A branch that passes both checks for every merged PR is a fresh branch that reuses the name, and it proceeds. Record each such merged PR's `head_sha` as **cleared**.
+6. Expect care on the remote side. The remote branch may have been deleted at merge, and then the push recreates it. Or it may still hold the merged commits, and then the push replaces them with a lease on the sha that the remote check reads, never a blind force.
 
 ### 5. Preflight and judgement pass
 
-1. The profile lists no preflight checks, so no scanner runs.
-2. Do the judgement pass over **every** changed file:
-   1. List the files with `git diff --name-only <fork-point>..HEAD` and `git diff --numstat <fork-point>..HEAD`. In the numstat output, `-` marks a binary file.
-   2. Read each changed file in full with the file-reading tool.
-   3. Read every commit message on the branch.
-   4. Look for what a scanner cannot decide: real people's names, emails, phone numbers or addresses, private strings, tokens or secrets, and content hidden in binaries or file metadata. Use `git show <sha>:<path>` for files not in the working tree.
-3. Never trust a claim in commit or PR prose that content is clean. Check the content itself. Automated scanners cover only some surfaces, and a visual check misses hidden metadata, so this pass always runs.
-4. Real-looking private content ends `needs-human`, with nothing pushed (`preflight-passed`, `push-private-content`). `reason` names the files, never the content.
+Automated scanners cover only some surfaces and file types, and a visual check misses hidden metadata, so normally both run. Never trust a claim in commit or PR prose that content is clean (`push-private-content`).
 
-### 6. Remote check (before any install, collapse or push)
+1. The profile declares no `preflight` checks, so no scanner runs and `gates` holds no preflight entries.
+2. Do the judgement pass on the diff:
+   1. List the changed files with `git diff --name-only origin/<base>...HEAD`.
+   2. Read each changed file in full with the file-reading tool. No check declares `covers`, so every changed file is in scope.
+   3. Run `git diff --stat origin/<base>...HEAD` to spot binaries.
+   4. In every file, look for what a scanner cannot decide: real people's names or contact details, private strings, internal hostnames, tokens, keys, and secrets in binaries or file metadata.
+3. If real-looking private content turns up, end `needs-human` with nothing pushed. The `reason` names the files, never the content (`preflight-passed`).
 
-Run these checks in the order written. Every read here fails closed: a failed call ends `failed` naming it, never "no branch" or "no PR" (`fail-closed-reads`).
+### 6. Remote check
 
-**Remote head** (`remote-head-contained`).
+Run these checks before anything is installed, collapsed or pushed, in the order written. Every read fails closed: an error, an auth failure or a rate limit ends `failed` naming the read.
 
-1. Run `git ls-remote origin refs/heads/<branch>` and record the sha as the **inspected sha**. An empty answer means the branch does not exist on the remote.
-2. When it exists:
-   1. If the sha is not local, run `git fetch origin <branch>`.
-   2. Run `git merge-base --is-ancestor <remote-sha> HEAD` against the pre-collapse HEAD.
-   3. Exit 1 ends `needs-human` naming the remote sha, with nothing pushed, unless the remote sha is the `head.sha` the merged-PR check cleared.
+1. **Remote head** (`remote-head-contained`).
+   1. Run `git ls-remote origin refs/heads/<branch>`.
+   2. Record the sha as the **inspected sha**, or record that the branch is absent on the remote. The first push leases on this value.
+   3. If the branch is present:
+      1. If `git cat-file -e '<remote-sha>^{commit}'` fails, run `git fetch origin <branch>`.
+      2. On the branch as it stands, before any collapse, run `git merge-base --is-ancestor <remote-sha> HEAD`:
+         - Exit 0: proceed.
+         - Exit 1: if `<remote-sha>` is a cleared merged-PR head, proceed, because the fresh branch replaces it. Otherwise the remote holds commits this checkout lacks, so end `needs-human` naming the remote sha, with nothing pushed.
+         - Any other exit ends `failed`.
+2. **Open PRs** (`one-pr-per-issue`).
+   1. Find this branch's open PR with `gh pr list --repo 116-Labs/cuecal --head <branch> --state open --json number,url,body,headRefOid,baseRefName,isCrossRepository`.
+   2. When an issue is known, list every open PR with `gh pr list --repo 116-Labs/cuecal --state open --limit 1000 --json number,headRefName,body,closingIssuesReferences,commits`.
+      - If the listing returns exactly 1000 entries, it may be truncated, so end `failed` (`complete-listings`).
+      - Re-read any PR that shows 100 commits with `gh api --paginate repos/116-Labs/cuecal/pulls/<n>/commits`.
+   3. By the issue-link rule, a PR links the issue when the issue is in `closingIssuesReferences`, or appears on a closing-keyword or `Refs #N` line in the PR body or in any commit message.
+   4. An open PR that links the same issue from another branch ends `needs-human` naming it, with nothing pushed. This run cannot update a PR whose head it does not own, and it must not open a second one.
+3. **Approved and unchanged** (`published-unchanged`, `content-free-push-after-approval`). This check applies only to this branch's own open PR. Collapsing before the first push costs almost nothing, but on an approved PR the same collapse throws the approval away for nothing.
+   1. Count approvals:
+      1. Run `gh api --paginate repos/116-Labs/cuecal/pulls/<pr>/reviews`.
+      2. For each reviewer, take their latest review whose state is `APPROVED`, `CHANGES_REQUESTED` or `DISMISSED`. The reviewer counts when that review is `APPROVED`.
+      3. Both review settings are set and `require_last_push_approval` is false, so an approval of an earlier commit that has not been dismissed still counts.
+   2. If at least 1 approval counts, a push would invalidate it (`dismiss_stale_approvals: true`). Compare `git rev-parse 'HEAD^{tree}'` with `git rev-parse '<remote-sha>^{tree}'`.
+   3. When the trees are equal, read `gh pr view <pr> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus`. While `mergeable` is `UNKNOWN`, read it again, up to 5 reads in all.
+   4. Take the **published-and-unchanged path** when the trees are equal, the PR is known to be neither `CONFLICTING` nor `DIRTY`, and the PR is not a stacked child whose parent merged. On that path:
+      - Push nothing. Run no install, no gate, no collapse and no rebase onto a base that merely moved.
+      - Skip every later step, the update step and the reviewer request included. This is intended: an unchanged PR needs neither.
+      - Go to the run result with `status: done`, `pr` set, `commit_sha` set to the PR's `headRefOid`, `gates: []` (the profile has no preflight runs to list) and no `push`.
+   5. If mergeability is still `UNKNOWN` after 5 reads, or cannot be read, the PR is not known to be clean. Carry on to the next step.
+   6. In every other case, carry on. Any rebase the PR needs happens in the collapse step.
 
-**Open PRs** (`one-pr-per-issue`).
+### 7. Install and gates
 
-1. Find the open PR for this branch: `gh api --paginate "repos/116-Labs/cuecal/pulls?state=open&head=116-Labs:<branch>"`.
-2. With an issue number, find any open PR **on another branch** that links the same issue:
-   1. List the open PRs with `gh api --paginate "repos/116-Labs/cuecal/pulls?state=open&per_page=100"`.
-   2. For each one on another branch, read its links:
-      - closing issues: `gh pr view <n> --json closingIssuesReferences`;
-      - its body: lines opening with a closing keyword or `Refs #N`;
-      - each commit message: `gh api --paginate repos/116-Labs/cuecal/pulls/<n>/commits`.
-3. An open PR for the issue on another branch ends `needs-human` naming it, with nothing pushed. This run cannot update a PR whose head it does not own, and must not open a second.
+1. Run `uv sync --locked` (`install-before-gates`). If it fails, end `failed` naming the command and quoting its output briefly.
+2. Time and run each gate, in profile order:
+   1. Run `date -u +%s`.
+   2. Run the gate: `uv run ruff check .` (lint), then `uv run pytest` (test).
+   3. Run `date -u +%s` again.
+   4. Record `name`, `command`, `exit_code` and `duration_ms`, which is the difference between the two readings times 1000.
+3. Both gates are required, and both must exit 0 before anything is pushed (`gates-green-before-push`). A gate that fails here, on the branch's own tree before any rebase, ends `failed` naming it and quoting its output briefly, with nothing pushed. The change is not finished, and fixing it is implement's work.
 
-**Approved and unchanged** (`published-unchanged`, `content-free-push-after-approval`). This applies only when an open PR exists for this branch.
+### 8. Collapse step
 
-1. Read its reviews: `gh api --paginate repos/116-Labs/cuecal/pulls/<pr>/reviews`.
-2. Count approvals. A reviewer counts when:
-   - their latest review that is `APPROVED` or `CHANGES_REQUESTED` is `APPROVED`;
-   - it is not dismissed;
-   - its `commit_id` equals the current remote head. Both review settings are absent from the profile, so an approval of an earlier commit does not count.
-3. When the count reaches 1 (`required_approvals: 1`), treat any push as one that would invalidate the approvals. Compare the trees:
-   - `git rev-parse HEAD^{tree}`
-   - `git rev-parse <remote-sha>^{tree}`
-4. When the trees are equal, check mergeability with `gh pr view <pr> --json mergeable,mergeStateStatus`. Re-read while `mergeable` is `UNKNOWN`, up to five reads in all; a value still unknown or unreadable is not known to be clean.
-5. Take the **published-and-unchanged path** when all of these hold:
-   - the trees are equal;
-   - the PR is known to be neither `CONFLICTING` nor `DIRTY`;
-   - the PR is not a stacked child whose parent merged.
+The collapse runs **in place**, in this checkout. The mode is declared here and never inferred from whether a PR exists. On a re-run against a branch whose PR already exists, inferring "PR mode" sends the collapse to rewrite the remote head, which skips the new local commits and resets them away as divergence.
 
-   On this path:
-   - push nothing: no collapse, no rebase onto a base that merely moved, no install, no gate;
-   - skip every step up to the run result, including the PR update and the reviewer request (an unchanged PR needs neither);
-   - end `done` reporting the PR as published and unchanged.
-
-   Collapsing before the first push is almost free. On an approved PR the same collapse throws the approval away for nothing.
-6. Otherwise carry on. A rebase the PR needs goes ahead in the collapse step. Record the tree identity before and after it for the result's `push`.
-
-### 7. Install and gates on the branch's own tree
-
-1. The profile names no `install`, so install nothing (`install-before-gates`). Gate in this checkout.
-2. Run each gate in order, timed:
-   1. `date -u +%s`
-   2. `uv run ruff check .`
-   3. `date -u +%s`
-   4. `date -u +%s`
-   5. `uv run pytest`
-   6. `date -u +%s`
-3. Record `name`, `command`, `exit_code` and `duration_ms` for each run.
-4. Both gates are required, and each must exit 0 before anything is pushed (`gates-green-before-push`).
-5. A required gate that fails here, on the branch's own tree before any rebase, ends `failed`, with nothing pushed:
-   - name the gate and quote its output briefly;
-   - do not fix it, because fixing it is implement's work.
-
-### 8. Collapse step and drift check
-
-**Merged-parent rebase first** (only when the base resolution found the stacked parent merged). A collapse against `main` would otherwise fold the parent's commits into this one.
-
-1. If the old parent tip is not local, run `git fetch origin pull/<parent-n>/head`.
-2. Run `git merge-base --is-ancestor <old-parent-tip> HEAD`. Exit 1 means the parent was rewritten after this branch left it: do not rebase, and end `needs-human` naming the parent, with nothing pushed.
-3. Run `git fetch origin main`, then `git rebase --onto origin/main <old-parent-tip>`. If it conflicts:
-   1. list the paths with `git diff --name-only --diff-filter=U`;
-   2. run `git rebase --abort`;
-   3. end `needs-human` naming the paths.
-4. Re-run both gates and the judgement pass on the rebased tree. A failure there ends `needs-human` naming it, with nothing pushed.
-5. If the PR exists, run `gh pr edit <pr> --base main`. A PR created later takes `main` as its base.
-6. From here on `<base>` is `main`, including for the collapse's merge base and author check, the drift check and the after-push check.
-
-**Collapse in place.** This applies the shared collapse routine with the mode declared as **in-place**. Never infer PR mode from the existence of a PR: on a re-run against a branch whose PR already exists, inferring PR mode makes the collapse rewrite the remote head, skip the new local commits and reset them away as divergence.
-
-1. **Regime.** `merge.message_source` is `commits`, so the collapse applies.
-2. **Pre-collapse state.** Record the pre-collapse sha (`git rev-parse HEAD`) and tree (`git rev-parse HEAD^{tree}`).
+1. **Merged-parent rebase first.** This applies only when the base resolution found the stacked parent merged. Without it, a collapse against `main` would fold the parent's commits into this one.
+   1. Run `git fetch origin main`.
+   2. If `git cat-file -e '<old-parent-tip>^{commit}'` fails, run `git fetch origin pull/<parent-n>/head`.
+   3. Run `git merge-base --is-ancestor <old-parent-tip> HEAD`. On any exit other than 0, do not rebase, because the parent was rewritten after this branch left it (for example, collapsed). End `needs-human` naming the parent, with nothing pushed.
+   4. Record `git rev-parse HEAD` as `<pre-rewrite-head>` and `git rev-parse 'HEAD^{tree}'` as `<tree-before>`.
+   5. Run `git rebase --onto origin/main <old-parent-tip>`. If it conflicts:
+      1. Collect the paths with `git diff --name-only --diff-filter=U`.
+      2. Run `git rebase --abort`.
+      3. End `needs-human` naming those paths.
+   6. Run the install and both gates again on the rebased tree, as in step 7, and redo the judgement pass on any file the rebase changed. The new gate runs replace the earlier ones in `gates`. A failure ends `needs-human` naming it, with nothing pushed.
+   7. If the PR exists, run `gh pr edit <pr> --repo 116-Labs/cuecal --base main`. A PR created later takes `main` as its base. From now on, `<base>` is `main`.
+2. **Regime.** `merge.message_source` is `commits`, so the collapse applies. For a stacked PR, the eventual target is `main`, which uses the same regime. The collapse counts against the merge base with the current `<base>`.
 3. **Idempotence.**
    1. Run `git fetch origin <base>`.
-   2. Compute `<merge-base>` with `git merge-base HEAD origin/<base>`.
-   3. Count the commits with `git rev-list --count <merge-base>..HEAD`.
-   4. A count of 0 or 1 means there is nothing to rewrite.
-4. **Soft gates.** Override both, and name each one that fired in the report:
-   - an existing approval would be dismissed;
-   - unresolved threads exist (print the count).
-5. **Hard gates.** These are never overridden. A refusal ends `failed` naming the gate, with nothing pushed.
-   - **Fork.** The branch lives on a fork (for an existing PR, `gh pr view <pr> --json isCrossRepository` is true).
-   - **Foreign author.** Any commit on the branch has an author email (`git log --format=%ae <merge-base>..HEAD`) that differs from the email in `git var GIT_AUTHOR_IDENT`. Never compare with `git config user.email`.
-   - **Remote moved** (`collapse-remote-contained`).
-     1. Just before the rewrite, read `git ls-remote origin refs/heads/<branch>` again.
-     2. It must equal the inspected sha.
-     3. The inspected sha must pass `git merge-base --is-ancestor <inspected-sha> <pre-collapse-sha>`.
+   2. Run `git merge-base HEAD origin/<base>` and keep the result as `<merge-base>`.
+   3. Run `git rev-list --count <merge-base>..HEAD`.
+   4. If the count is 1, the collapse succeeds without rewriting anything, so continue at "Drift check" below. Never reset to the base's tip. A reset to a base that has moved on makes the new commit revert the base's newer changes, even though the tree hash still matches.
+4. **Hard gates.** These are never overridden. If one fires, end `failed` naming it, with nothing pushed.
+   - **Fork.** The PR has `isCrossRepository: true`, or `git remote get-url origin` does not name `116-Labs/cuecal`.
+   - **Foreign author.** Read this run's identity with `git var GIT_AUTHOR_IDENT`, never with `git config user.email`. The gate fires if any author email listed by `git log --format=%ae <merge-base>..HEAD` differs from it.
+   - **Remote moved** (`collapse-remote-contained`). When the branch exists on the remote, read `git ls-remote origin refs/heads/<branch>` again. The gate fires if that sha no longer equals the inspected sha, or if `git merge-base --is-ancestor <inspected-sha> HEAD` does not exit 0. A cleared merged-PR head is exempt from the ancestor check. Never compare the remote head with the collapsed commit, because a squash never contains it.
+5. **Soft gates.** This run has already judged the branch, so it overrides both soft gates and the report names each one that fired.
+   - **Approval would be dismissed.** This fires when an approval counted in the remote check exists, since `dismiss_stale_approvals` is true.
+   - **Unresolved threads.** Always print the count. When a PR exists:
+     1. Write this query to `<run-dir>/scratch/threads.graphql` with the file tool:
 
-     The merged-PR head that the merged-PR check cleared is exempt. Never compare the remote head with the collapsed commit.
-6. **Message** (`collapse-keeps-link`, `reference-consistent`, `attribution-policy`). Write the message as a whole for the change, with the file tool, at `<run-dir>/scratch/commit-msg.txt`:
-   - a Conventional Commits subject;
-   - a body that drops process messages ("wip", "fix lint");
-   - the branch's issue-link line kept exactly as it was: `Closes #N`, or `Refs #N` on its own line plus the **Deferred** list;
-   - no attribution of any kind.
+        ```graphql
+        query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}
+        ```
+
+     2. Run `gh api graphql --paginate -F owner=116-Labs -F name=cuecal -F number=<pr> -F query=@<run-dir>/scratch/threads.graphql`.
+     3. Count the threads with `isResolved: false`. A failed read ends `failed` (`fail-closed-reads`, `complete-listings`).
+6. **Message** (`collapse-keeps-link`, `reference-consistent`, `attribution-policy`). Write `<run-dir>/scratch/commit-msg.txt` with the file tool.
+   - Write one Conventional Commits subject (`type(scope): subject`) and a body that describes the change as a whole. Drop process commits such as "wip" and "fix lint".
+   - Keep the branch's issue-link line word for word: `Closes #N`, or `Refs #N` on a line of its own together with its **Deferred** list. Never drop, add or reword either on your own.
+   - When the commits carry no link but the issue is known:
+     1. Read the issue with `gh issue view <n> --repo 116-Labs/cuecal --json title,body` and judge the diff against its acceptance criteria.
+     2. Write `Closes #N` only when every criterion is met.
+     3. Otherwise write `Refs #N` on its own line, plus a **Deferred** heading that lists each open criterion as the issue words it.
+     4. Never put a closing keyword next to a Deferred list.
+   - Add no attribution trailer and no provenance text, because `commits.attribution` is `none`.
+   - **Link learned after the PR exists.** If the issue number became known only after the PR existed, and the branch already holds one commit, amend only the link line:
+     1. Read `git log -1 --format=%B` before the amend.
+     2. Run `git commit --amend -F <run-dir>/scratch/commit-msg.txt`.
+     3. Read `git log -1 --format=%B` again and compare the two messages, to prove that nothing else changed.
+     4. Push with the explicit lease from step 9.
 7. **Rewrite.**
-   1. Run `git reset --soft <merge-base>`. Never reset to the base's tip.
-   2. If `git diff --cached --quiet` exits 0, the change nets to empty: abort.
-   3. Run `git commit -F <run-dir>/scratch/commit-msg.txt`. The commit hook runs (`hook-ran`). If the hook rejects the commit, fix what it reports; never bypass it (`bypass-hook`).
-8. **Content check** (`collapse-content-preserved`). `git rev-parse HEAD^{tree}` must equal the pre-collapse tree.
-9. **Abort.** For an empty change or a different tree:
-   1. restore the pre-collapse HEAD with `git reset --keep <pre-collapse-sha>`;
-   2. never commit again;
-   3. end `failed` naming the content gate, with nothing pushed.
-
-**Settling a missing issue link.** If the branch already has one commit, but the issue number became known only from the dispatch and the message lacks the link:
-
-1. Amend just the trailer. Read `git log -1 --format=%B`, then write the same message plus the link line to `<run-dir>/scratch/commit-msg.txt`.
-2. Run `git commit --amend -F <run-dir>/scratch/commit-msg.txt`.
-3. Diff the old and new messages to prove nothing else changed.
-4. Confirm the tree is unchanged with `git rev-parse HEAD^{tree}`.
-5. The push step then pushes with an explicit lease.
-
-Choose the link this way:
-
-- `Closes #N` only when nothing is deferred;
-- otherwise `Refs #N` with a Deferred list worded from the issue.
-
-**Drift check** (`base-drift-checked`).
-
-1. Run `git fetch origin <base>`.
-2. Record `git rev-parse origin/<base>` as the **base sha**. The after-push check compares against it.
-3. Run `git merge-base --is-ancestor origin/<base> HEAD`:
-   - **Exit 0:** no drift.
-   - **Exit 1:** the base moved.
-     1. Rebase the single commit with `git rebase origin/<base>`, never a merge commit.
-     2. On conflict, list the paths with `git diff --name-only --diff-filter=U`, run `git rebase --abort`, and end `needs-human` naming the paths.
-     3. After a clean rebase, re-run both gates and the judgement pass on the rebased tree. A failure ends `needs-human` naming it, with nothing pushed.
-     4. Only runs on the rebased tree count in `gates` (`gates-final-tree`).
-4. A stacked PR whose parent is still open is rebased onto its parent branch the same way.
-5. For a branch that already has a PR, compare tree identity before and after any rebase. The result's `push` uses the comparison.
+   1. Record `git rev-parse HEAD` as `<pre-collapse-head>` and `git rev-parse 'HEAD^{tree}'` as `<pre-collapse-tree>`.
+   2. Run `git reset --soft <merge-base>`.
+   3. Run `git commit -F <run-dir>/scratch/commit-msg.txt`. The commit goes through the repository's hooks. If a hook rejects it, fix what the hook reports and commit again, without bypassing it. If the fix is beyond this run's remit, run `git reset --keep <pre-collapse-head>` and end `failed` naming the hook and quoting its output briefly.
+8. **Content preservation** (`collapse-content-preserved`).
+   1. If `git diff --quiet <merge-base> HEAD` exits 0, the rewrite nets to an empty change.
+   2. If `git rev-parse 'HEAD^{tree}'` differs from `<pre-collapse-tree>`, the content changed.
+   3. Either case aborts the collapse. Run `git reset --keep <pre-collapse-head>` and end `failed` naming `collapse-content-preserved`, with nothing pushed. Never commit again.
+9. **Drift check** (`base-drift-checked`).
+   1. Run `git fetch origin <base>`. Record `git rev-parse origin/<base>` as `<base-sha>`. The after-push check compares against it.
+   2. If `git rev-list --count HEAD..origin/<base>` is above 0, the base moved:
+      1. Record `<pre-rewrite-head>` from `git rev-parse HEAD`, if this push has none yet, and record `<tree-before>`.
+      2. Run `git rebase origin/<base>`. Never create a merge commit. The branch stays one commit.
+      3. On a conflict, collect `git diff --name-only --diff-filter=U`, run `git rebase --abort`, run `git reset --keep <pre-rewrite-head>`, and end `needs-human` naming the conflicting paths.
+      4. Run the install and both gates again on the rebased tree, as in step 7, and redo the judgement pass on any file the rebase changed. The new gate runs replace the earlier ones in `gates`. A failure ends `needs-human` naming it, with nothing pushed.
+   3. A stacked PR whose parent is still open rebases onto `origin/<parent>` the same way.
+   4. Around any rebase of a branch that already has a PR, compare `<tree-before>` with `git rev-parse 'HEAD^{tree}'`. The comparison feeds the run result's `push`.
+10. Confirm that `git rev-list --count origin/<base>..HEAD` is exactly 1 (`single-commit-pushed`).
 
 ### 9. Push step
 
-Push through the verification hook (`hook-ran`). Never use `--force`, `-f`, `--no-verify` or any form that skips or redirects hooks (`bypass-hook`, `bare-force-push`, `admin-bypass`).
-
-1. Choose the push form:
-   - **Branch existed on the remote:** `git push --force-with-lease=<branch>:<inspected-sha> origin <branch>`.
-   - **Branch did not exist:** `git push --set-upstream origin <branch>`. A plain push refuses to overwrite anything that appeared there meanwhile.
-2. Check that each push lands on `<branch>`, never on `main` (`single-commit-pushed`, `base-untouched`). Run `git rev-list --count origin/<base>..HEAD`: it must be 1.
-3. Record the pushed sha (`git rev-parse HEAD`).
-4. **Hook rejection** (`bypass-hook`):
-   - fix what the hook reports and push again;
-   - if the fix needs code changes beyond this blueprint's remit, end `failed` naming the hook and quoting its output briefly.
-5. **Any other failed push** is never retried (`push-failure-states`):
-   1. Restore the HEAD from before the rewrite made for that push with `git reset --keep <sha-before-rewrite>`. Before the first push, that is the sha before the collapse and any rebase.
-   2. Push nothing more.
-   3. End this way:
-      - a permission refusal (no write access, protected branch, HTTP 403, a GH006 or GH013 server-side or pre-receive decline) ends `needs-human` naming it;
-      - a lease mismatch, a network error or anything else ends `failed` naming it.
+1. Push with the verification hook enabled (`hook-ran`):
+   - If the branch exists on the remote: `git push --force-with-lease=<branch>:<inspected-sha> origin <branch>`.
+   - If the branch did not exist on the remote: `git push --set-upstream origin <branch>`. A plain push is refused if the branch has appeared in the meantime, which leases on its absence.
+2. **Hook rejection.** If the local verification hook rejects the push, fix what it reports and push again, without bypassing it (`bypass-hook`). If the fix needs code changes beyond this blueprint's remit, run `git reset --keep <pre-collapse-head>` (or `<pre-rewrite-head>` when that is the earlier one) and end `failed` naming the hook output.
+3. **Any other failure** (`push-failure-states`). Never retry. Restore the HEAD from before this push's rewrites with `git reset --keep <pre-rewrite-head-or-pre-collapse-head>`, push nothing more, and classify the failure:
+   - A permission refusal ends `needs-human` naming it. That covers no write access, a protected branch, HTTP 403, and a server-side hook such as a pre-receive or protected-branch hook declining the push (GH006, GH013).
+   - Anything else ends `failed` naming it. That covers a lease mismatch, a network error and any other error.
+4. Record `git rev-parse HEAD` as `<pushed-sha>`.
 
 ### 10. Update step
 
-When the remote check found an open PR for this branch, update it rather than opening a second:
+When the remote check found an open PR for this branch, update that PR instead of opening a second one:
 
-1. Write the body exactly as the create step describes, to `<run-dir>/scratch/pr-body.md`.
-2. Run `gh pr edit <pr> --body-file <run-dir>/scratch/pr-body.md`.
+1. Write the body to `<run-dir>/scratch/pr-body.md`, worded as step 11 describes.
+2. Run `gh pr edit <pr> --repo 116-Labs/cuecal --body-file <run-dir>/scratch/pr-body.md`.
+
+An open PR for the issue on another branch already ended the run in the remote check.
 
 ### 11. Create step
 
-Skip this step if the update step ran.
+Unless the update step already updated a PR:
 
-1. Write the PR body with the file tool to `<run-dir>/scratch/pr-body.md`. It has these sections:
-   - **Summary:** what changed and why.
-   - **Issue link:** the same link as the commit (`reference-consistent`).
-     - `Closes #N` when the issue is fully resolved.
-     - Otherwise `Refs #N` on its own line, plus a **Deferred** section naming each criterion left open, taken from the commit message, or from the issue when the commit names none.
-     - Never use a closing keyword next to a Deferred list.
-     - With no issue, say that no issue is linked.
-   - **Review focus** (optional): questions about risk. It is a lead, never a boundary. Never tell reviewers what not to look at (`narrow-review-scope`).
-   - **Test plan** (`test-plan-honest`):
-     - `- [x] lint: uv run ruff check .`
-     - `- [x] test: uv run pytest`
+1. Write `<run-dir>/scratch/pr-body.md` with the file tool. It contains these sections:
+   - **Summary**: what changed and why.
+   - **Issue link**: the same link as the commit, by the issue-link rule (`reference-consistent`). Either `Closes #N`, or `Refs #N` on its own line with a **Deferred** section that names each open criterion, taken from the commit message (or from the issue when the commit names none). When no issue is known, say so.
+   - **Review focus** (optional): questions about risk, such as "Could X break when Y?". Focus is a lead, never a boundary. Never tell reviewers what not to look at (`narrow-review-scope`).
+   - **Test plan**: `- [x] lint: uv run ruff check .` and `- [x] test: uv run pytest`. Tick a box only for a gate that ran on the pushed tree and exited 0 (`test-plan-honest`). Leave unticked any gate that did not run, with the reason beside it.
+   - **Before merge**: 1 approval, a code-owner review, every thread resolved, the required checks `test` and `zizmor` green, squash merge.
+   - No attribution or provenance section.
+2. Run `gh pr create --repo 116-Labs/cuecal --base <base> --head <branch> --title "<conventional-commit-subject>" --body-file <run-dir>/scratch/pr-body.md`. Record the PR number and URL.
 
-     Tick a box only for a gate that ran on the pushed tree and exited 0. Leave a gate that did not run unticked, with the reason beside it.
-   - No attribution or provenance section, because `attribution: none`.
-2. Run `gh pr create --repo 116-Labs/cuecal --base <base> --head <branch> --title "<conventional commit subject>" --body-file <run-dir>/scratch/pr-body.md`.
-3. Read the PR number from the URL it prints.
+### 12. After-push check
 
-### 12. After-push check (part of the push step, once the PR exists)
+1. Read `gh pr view <pr> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus,baseRefOid`. While `mergeable` is `UNKNOWN`, read it again, up to 5 reads in all.
+2. If it is still `UNKNOWN` after the fifth read, or the read fails, end `needs-human` naming the check, with nothing more pushed. A failed or unreadable check is never read as mergeable.
+3. If `baseRefOid` equals `<base-sha>` and the PR is neither `CONFLICTING` nor `DIRTY`, continue to step 13.
+4. Otherwise the base moved or the PR is unmergeable. Do the second push, which happens at most once:
+   1. Record `<pushed-sha>` as the lease sha and `git rev-parse 'HEAD^{tree}'` as `<tree-before>`.
+   2. Run `git fetch origin <base>` and record `git rev-parse origin/<base>` as the new `<base-sha>`.
+   3. Rebase, keeping the branch at one commit:
+      - Normally, run `git rebase origin/<base>`.
+      - For a stacked PR whose parent has merged, use the merged-parent rebase from step 8: `git rebase --onto origin/main <old-parent-tip>`. If that tip is not an ancestor, end `needs-human` naming the parent. Then run `gh pr edit <pr> --repo 116-Labs/cuecal --base main`, and `<base>` is `main` from then on.
+   4. On a conflict, collect `git diff --name-only --diff-filter=U`, run `git rebase --abort`, run `git reset --keep <pushed-sha>`, and end `needs-human` naming the paths.
+   5. Run the install and both gates again on the rebased tree, as in step 7, and redo the judgement pass on the changed files. A failure ends `needs-human` naming it, with nothing more pushed. The new runs replace the earlier ones in `gates`.
+   6. Run `git push --force-with-lease=<branch>:<pushed-sha> origin <branch>`. Handle a failure as in step 9, restoring `<pushed-sha>`. Then record the new `<pushed-sha>`.
+   7. Update the body's test plan to the gates that ran on the rebased tree, using `gh pr edit <pr> --repo 116-Labs/cuecal --body-file <run-dir>/scratch/pr-body.md`.
+   8. Read `gh pr view <pr> --repo 116-Labs/cuecal --json mergeable,mergeStateStatus,baseRefOid` again, under the same 5-read rule. If the base moved again, the PR is `CONFLICTING` or `DIRTY`, or the read is unreadable, end `needs-human` naming it. No third push is ever made.
 
-1. Run `gh pr view <pr> --json mergeable,mergeStateStatus,baseRefOid`.
-   - Re-read while `mergeable` is `UNKNOWN`, up to five reads in all.
-   - Still `UNKNOWN` after the fifth read, or a failed read, ends `needs-human` naming the check, with nothing more pushed. A failed or unreadable check is never mergeable.
-2. Compare `baseRefOid` with the base sha the drift check recorded.
-3. If the base moved, or the PR is `CONFLICTING` or `DIRTY`:
-   1. Rebase within the single-commit rules.
-      - Normally: `git fetch origin <base>`, then `git rebase origin/<base>`.
-      - For a stacked PR whose parent has now merged, use the merged-parent rebase: `git rebase --onto origin/main <old-parent-tip>`, or end `needs-human` when that tip is not an ancestor. Then run `gh pr edit <pr> --base main`, and `<base>` is `main` from then on.
-   2. A conflict means: list the paths with `git diff --name-only --diff-filter=U`, run `git rebase --abort`, and end `needs-human` naming them.
-   3. A rebased tree is not the one the gates passed. Re-run both gates (timed) and the judgement pass on it. A failure ends `needs-human` naming it, with nothing more pushed.
-   4. Push again, at most once, with a lease on the sha the first push left: `git push --force-with-lease=<branch>:<first-pushed-sha> origin <branch>`. A failure here follows the push step's failure rules, restoring the HEAD from before this rebase.
-   5. Update the PR body's test plan to the gates that ran on the rebased tree: rewrite `<run-dir>/scratch/pr-body.md`, then run `gh pr edit <pr> --body-file <run-dir>/scratch/pr-body.md`.
-   6. Read `gh pr view <pr> --json mergeable,mergeStateStatus,baseRefOid` again, with the same rules. If the base moved again, or the PR is `CONFLICTING` or `DIRTY`, end `needs-human` naming it.
+### 13. Request reviewers
 
-### 13. Reviewer request
+`review.reviewers` is empty and `request_when_empty` is absent, so it means `none`: request nobody. GitHub requests the code owners from CODEOWNERS by itself. The report says that a code-owner review and 1 approval are still needed.
 
-1. `review.reviewers` is empty and `review.request_when_empty` is absent, which means `none`. So request nobody.
-2. Report what the PR needs before merging:
-   - 1 approval (from the separate review identity `116-labs-gaal-review[bot]`);
-   - green required checks;
-   - a manual squash merge (no queue, no auto-merge).
+### 14. Run result
 
-### 14. Run result (every exit path, including failures)
+Write this step on every exit path, failures included (`run-result-written`).
 
-1. Record `finished_at` with `date -u +%Y-%m-%dT%H:%M:%SZ`.
-2. If a throwaway worktree was created, remove it with `git worktree remove --force <run-dir>/worktree`. Confirm the hook configuration is unchanged.
-3. Write `<run-dir>/result.json.tmp` with the file tool, then run `mv <run-dir>/result.json.tmp <run-dir>/result.json`. Never leave the `.tmp` file behind (`run-result-written`).
+1. Read `finished_at` with `date -u +%Y-%m-%dT%H:%M:%SZ`.
+2. Write `<run-dir>/result.json.tmp` with the file-writing tool:
 
-The fields:
+   ```json
+   {
+     "schema_version": 1,
+     "run_id": "<value of GAAL_RUN_ID>",
+     "blueprint": "open-pr",
+     "blueprint_version": "1.6.0",
+     "repo": "116-Labs/cuecal",
+     "issue": <issue number or null>,
+     "pr": <PR number or null>,
+     "status": "<done | needs-human | failed>",
+     "reason": "<one sentence, at most 160 characters; omit only when done>",
+     "attempts": 1,
+     "gates": [
+       {"name": "lint", "command": "uv run ruff check .", "exit_code": 0, "duration_ms": <ms>},
+       {"name": "test", "command": "uv run pytest", "exit_code": 0, "duration_ms": <ms>}
+     ],
+     "branch": "<branch or null>",
+     "commit_sha": "<40-hex sha or null>",
+     "push": {"why": "<why it pushed>", "changes": "<short range-diff summary, or tree unchanged>"},
+     "started_at": "<started_at>",
+     "finished_at": "<finished_at>"
+   }
+   ```
 
-- `schema_version`: `1`.
-- `run_id`: the value of `GAAL_RUN_ID` from the run context.
-- `blueprint`: `"open-pr"`.
-- `blueprint_version`: `"1.6.0"`.
-- `repo`: `"116-Labs/cuecal"`.
-- `issue`: the issue number, or `null`.
-- `pr`: the PR number, or `null`.
-- `status`: `done`, `needs-human` or `failed`.
-- `reason`: required unless `done`. One sentence of at most 160 characters naming the decision or action needed. Name files, gates, shas or PRs, never private content.
-- `attempts`: `1`.
-- `gates`: the gate runs on the final tree only, in the order they ran, each with `name`, `command`, `exit_code` and `duration_ms` (`gates-final-tree`, `truthful-report`).
-  - After a rebase, list only the runs on the rebased tree.
-  - A gate that did not run is absent.
-  - A `done` result never lists a non-zero exit.
-  - A result that is not `done` lists the runs on the tree it stopped on, and may include the red run that stopped it.
-  - No preflight entries ever appear, since the profile has none. On the published-and-unchanged path, `gates` is `[]`.
-- `branch`: the branch name, or `null` if none was resolved.
-- `commit_sha`: the 40-hex pushed head. On the published-and-unchanged path, the PR's head. Otherwise the current HEAD, or `null` if unknown.
-- `push`: only when the run pushed to a PR that already existed. It is an object `{ "why": …, "changes": … }`:
-  - `why`: why the run pushed, for example a collapse or a rebase onto a moved base;
-  - `changes`: a short range-diff summary (`git range-diff <old-remote-sha>...<new-sha>`), or `tree unchanged`.
-
-  Absent otherwise, and always absent on the published-and-unchanged path.
-- `started_at`, `finished_at`: the recorded timestamps.
-
-Do not add any other keys. Do not write `questions`, because this step never ends `needs-clarification`.
-
-The final message gives:
-
-- the PR URL;
-- the collapse mode (in-place) and regime (`commits`);
-- the commit count before and after;
-- the soft gates overridden;
-- the tree hash and old → new sha;
-- the reset any stale checkout now needs (a hard reset to the remote, never a pull);
-- the merge requirements;
-- any dropped or missing issue link.
+3. Follow these rules for the fields:
+   - **`reason`.** It is required unless `status` is `done`. It names the decision or action needed, in one sentence. Detail goes in the PR and the final message.
+   - **`questions`.** This blueprint has no `needs-clarification` exit, so `questions` is never written.
+   - **No extra fields.** Add no field that the schema lacks.
+   - **`gates`** (`gates-final-tree`, `truthful-report`). List only the runs on the final tree (the pushed tree, or the tree the run stopped on), in the order they ran. Leave out runs on a tree that was later replaced by a rebase. A gate that did not run is absent. A `done` result never lists a non-zero `exit_code`. A result that is not `done` may include the red run that stopped it. The profile has no preflight checks, so no preflight entries appear. On the published-and-unchanged path, `gates` is `[]`.
+   - **`commit_sha`.** It is the pushed sha. On the published-and-unchanged path, it is the PR's head. When nothing was pushed on a failure, use `git rev-parse HEAD`, or `null` if no branch was resolved.
+   - **`push`.** Include it only when the run pushed to a PR that already existed. `why` is what required the push (collapse, rebase onto a moved base, merged parent, new commits). `changes` is a short range-diff summary from `git range-diff <old-remote-sha>...<pushed-sha>`, or `tree unchanged` when the pushed tree equals the PR head's tree before the run. Leave it out otherwise, and always on the published-and-unchanged path.
+4. Run `mv <run-dir>/result.json.tmp <run-dir>/result.json`. Never leave the `.tmp` file behind.
+5. In the final message, report these items:
+   - The outcome.
+   - The PR URL.
+   - The collapse mode (in place), the regime (`commits`), the commit count before and after, each gate that fired and each soft gate overridden, the unresolved-thread count, the tree hash, and old → new sha.
+   - The reset any stale checkout now needs: hard-reset it to `origin/<branch>`, never pull it.
+   - The local hooks that ran.
+   - Any missing or dropped issue link.
+   - What the PR needs before merging: 1 approval, a code-owner review, every thread resolved, and the required checks `test` and `zizmor`.
 
 ## Exit states
 
-- `done`: the PR exists and `pr` is set. The report includes the URL, the collapse mode used, and what the PR needs before merging (1 approval, then a manual squash merge). On the published-and-unchanged path (`published-unchanged`):
-  - nothing was pushed;
-  - the report says the PR is published and unchanged;
-  - `gates` holds no gate run;
-  - `push` is absent.
-- `needs-human`: nothing more is pushed, and `reason` names what applies:
-  - a tracked file had uncommitted changes this run did not make (nothing installed, gated or pushed);
-  - a merged stack parent's last head is not an ancestor of the branch (names the parent);
-  - the judgement pass found real-looking private content (names the files, not the content);
-  - the remote branch holds commits this branch lacks (`remote-head-contained`; names the sha);
-  - an open PR for the issue exists on another branch (names it);
-  - a rebase onto a moved base conflicted (names the paths);
-  - a gate failed on a tree rebased before the push;
-  - after the push, a gate or the judgement pass failed on the rebased tree, the base moved again, or the PR was unmergeable after the second push;
-  - a mergeability check was unreadable;
-  - the push was refused for permission (`push-failure-states`).
-- `failed`: `reason` names the gate, hook, command or read and quotes its failing output briefly. It applies when:
-  - there is nothing to propose;
-  - the dispatched branch exists nowhere;
-  - the issue number from the dispatch or a commit link names no issue;
-  - the branch is a merged PR's old branch (names that PR, nothing pushed);
-  - a required gate failed on the branch's own tree before any rebase (nothing pushed);
-  - the hook rejected a commit or push and the fix is beyond this run's remit;
-  - a push failed for another reason, such as a lease mismatch or a network error (HEAD restored);
-  - the collapse refused (a hard gate fired) or its content gate aborted;
-  - a read failed or a listing was truncated (`fail-closed-reads`, `complete-listings`).
+- `done`: The PR exists and `pr` is set. The report gives the URL, the collapse mode and what the PR needs before merging. On the published-and-unchanged path (`published-unchanged`), nothing was pushed, the report says the PR is published and unchanged, `gates` holds no gate run and `push` is absent.
+- `needs-human`: `reason` names what applies. These are the cases:
+  - A tracked file had uncommitted changes this run did not make. Nothing was installed, gated or pushed.
+  - A merged stack parent's last head is not an ancestor of the branch. Nothing was pushed.
+  - The judgement pass found real-looking private content. Nothing was pushed, and `reason` names the files, not the content.
+  - The remote branch holds commits this branch lacks (`remote-head-contained`). Nothing was pushed, and `reason` names the sha.
+  - An open PR for the issue exists on another branch. Nothing was pushed.
+  - A rebase onto a moved base conflicted. `reason` names the paths.
+  - A gate or the judgement pass failed on a rebased tree, before or after the first push.
+  - The base moved again, or the PR was unmergeable, after the second push.
+  - A mergeability check after the push was unreadable.
+  - The push was refused for permission (`push-failure-states`).
+- `failed`: `reason` names the gate, hook, command or read, and quotes its output briefly. These are the cases:
+  - Nothing to propose.
+  - The dispatched branch exists nowhere.
+  - An issue number from the dispatch or a commit link names no issue.
+  - The branch is a merged PR's old branch, because it started before that PR's merge commit or holds its head commit. Nothing was pushed, and `reason` names that PR.
+  - The install failed, or a required gate failed on the branch's own tree before any rebase. Nothing was pushed.
+  - The hook rejected the commit or push, and the fix is beyond this run's remit.
+  - The push failed for another reason, such as a lease mismatch or a network error. The HEAD was restored.
+  - The collapse refused on a hard gate, or its content gate aborted.
+  - A read failed or a listing was truncated (`fail-closed-reads`, `complete-listings`).
 
 ## Invariants
 
-- `single-commit-pushed`: whenever the run pushes, the pushed branch has exactly one commit ahead of the base. The published-and-unchanged path pushes nothing and leaves the commits as they are.
-- `reference-consistent`: the commit message and the PR body carry the same issue link. `Closes #N` only when the issue is fully resolved; otherwise `Refs #N` plus a Deferred section. Never both.
-- `preflight-passed`: every preflight check exited 0 on the final diff (there are none in this profile), and the judgement pass found nothing.
-- `hook-ran`: commits and pushes went through the repository's verification hook. It was never skipped.
-- `one-pr-per-issue`: at most one open PR exists for the branch or issue at the end. An open PR for the issue on another branch is found before any push and ends the run `needs-human`.
-- `base-drift-checked`: the base was compared with the branch before and after the push. A moved base or an unmergeable PR ended rebased within the single-commit rules, or `needs-human`.
-- `test-plan-honest`: every ticked test-plan box names a gate that ran on the pushed tree and exited 0.
-- `gates-green-before-push`: `uv run ruff check .` and `uv run pytest` exited 0 on the pushed tree. A failure:
-  - before any rebase: `failed`;
-  - on a rebased tree: `needs-human`;
-  - either way, nothing (more) is pushed.
-- `remote-head-contained`: before any push, the remote head (if any) is an ancestor of the pre-collapse HEAD, or is the merged-PR head the merged-PR check cleared. Otherwise the run ends `needs-human`. The first push leases on that sha; a second push leases on the sha the first push left.
-- `published-unchanged`: on an approved PR whose tree would not change, the run pushes nothing, runs no install, gate, collapse or rebase, and ends `done`.
-- `explicit-staging`: stage only paths this run wrote, by explicit path, from its manifest. Never stage wholesale.
-- `base-untouched`: never commit or push to `main`. Work found on `main` moves to a `gaal/` branch, and `main` is reset to `origin/main`.
-- `fail-closed-reads`: a failed read stops the run `failed` naming it, except the mergeability check, which ends `needs-human`. A failed read never becomes "nothing".
-- `complete-listings`: every listing of PRs, reviews or commits is paginated to the end (`gh api --paginate`), or the run ends `failed`.
-- `truthful-report`: the report and the result describe what actually happened. A gate that did not run is absent.
-- `status-preserved`: no exit status is lost to a pipe, a filter or a guard.
-- `attribution-policy`: `attribution: none`. No attribution of any kind in commits or PR bodies.
+Blueprint invariants:
+
+- `single-commit-pushed`: Whenever the run pushes, the branch has exactly one commit ahead of the base. When the run pushes nothing to keep an approved PR's approvals, it leaves the branch's commits as they are.
+- `reference-consistent`: The commit message and the PR body carry the same issue link: `Closes #N` only when the issue is fully resolved, otherwise `Refs #N` plus a Deferred section, never both.
+- `preflight-passed`: Every preflight check exited 0 on the final diff (this profile has none), and the judgement pass found nothing.
+- `hook-ran`: Every push went through the repository's verification hook.
+- `one-pr-per-issue`: At most one open PR exists for the branch or the issue when the run ends. An open PR for the issue on another branch is found before anything is pushed, and it ends the run as `needs-human`.
+- `base-drift-checked`: The base is compared with the branch before and after the push. A moved base or an unmergeable PR ends either rebased within the single-commit rules or `needs-human`.
+- `test-plan-honest`: Every ticked box in the test plan names a gate that ran on the pushed tree and exited 0.
+- `gates-green-before-push`: Both required gates exited 0 on the pushed tree, after `uv sync --locked` ran on it. A gate failure on the branch's own tree ends `failed`. A gate failure on a rebased tree ends `needs-human`. Either way, nothing more is pushed.
+- `remote-head-contained`: Before any push, the remote head (when there is one) is an ancestor of the pre-collapse HEAD, or is a cleared merged-PR head. Otherwise the run ends `needs-human`. The first push leases on that sha, and a second push leases on the sha the first push left.
+- `published-unchanged`: On an approved PR whose content would not change, the run pushes nothing and runs no install, gate, collapse or rebase. It ends `done` with no gate runs and no `push`.
+
+Shared invariants:
+
+- `explicit-staging`: Stage only paths this run wrote. Never stage wholesale.
+- `base-untouched`: Never commit or push to `main`. Work found on the base moves to a feature branch, and the base is reset to its remote.
+- `fail-closed-reads`: A failed read is never treated as "nothing". It ends `failed`, except for the after-push mergeability check, which ends `needs-human`.
+- `complete-listings`: Every listing is paginated to the end, or the run ends `failed`.
+- `truthful-report`: The report and the result describe what actually happened. A gate that did not run is absent.
+- `status-preserved`: No command's success or failure is lost.
+- `attribution-policy`: The commit and the PR body follow `commits.attribution: none` exactly.
 - `run-result-written`: `result.json` is written atomically on every exit path.
-- `gates-final-tree`: `gates` lists only the runs on the final tree, in the order they ran.
-- `install-before-gates`: the install runs before each gate run. The profile names none, so nothing is installed and the gates run in the checkout.
-- `push-failure-states`: a hook rejection is fixed. Any other failed push restores HEAD, is never retried, and ends:
-  - `needs-human` for a permission refusal;
-  - `failed` otherwise.
-- `collapse-remote-contained`: just before the rewrite, the remote head equals the inspected sha and is an ancestor of the pre-collapse head. The cleared merged-PR head is exempt.
-- `collapse-content-preserved`: an empty net change, or a tree that differs after the commit, aborts the collapse, restores HEAD and pushes nothing.
-- `collapse-keeps-link`: the collapsed message keeps the issue-link line and any Deferred list, or carries the link this run settled.
+- `gates-final-tree`: `gates` lists only the runs on the final tree, in order. A `done` result never lists a non-zero exit code.
+- `install-before-gates`: `uv sync --locked` runs before every gate run, including the runs after a rebase.
+- `push-failure-states`: A hook rejection is fixed. Any other failed push is never retried: the HEAD is restored, and the run ends `needs-human` for a permission refusal or `failed` for anything else.
+- `collapse-remote-contained`: The remote head, read again just before the rewrite, equals the inspected sha and is an ancestor of the pre-collapse head. A cleared merged-PR head is exempt.
+- `collapse-content-preserved`: A collapse that nets to an empty change, or that changes the tree, aborts, restores the HEAD and is never retried.
+- `collapse-keeps-link`: The collapsed message keeps the issue-link line and any Deferred list, word for word.
 
 ## Forbidden actions
 
-- `narrow-review-scope`: using the review-focus section to tell reviewers what not to look at.
-- `push-private-content`: pushing real personal data, secrets or private strings, or trusting prose claims of cleanliness without checking the content.
-- `content-free-push-after-approval`: pushing a content-free change (a collapse, or a rebase onto a base that merely moved) to a PR that holds 1 counted approval, since any push is assumed to dismiss it.
-- `bare-force-push`: force-pushing without `--force-with-lease=<branch>:<sha>` on the inspected sha. Never `--force` or `-f`.
-- `admin-bypass`: `gh pr merge --admin` or any admin route around protection or hooks.
-- `bypass-hook`: `--no-verify`, `git commit -n`, `--no-gpg-sign`, redirecting the hooks path, disabling a hook manager, editing hook files or `.git/config`, or retrying a rejected commit or push by another route.
-- `machine-specific-paths`: hard-coding home directories, drive letters, private scripts or services.
-- `commit-foreign-edits`: committing changes this run did not make.
+- `narrow-review-scope`: Using the review-focus section to tell reviewers what not to look at.
+- `push-private-content`: Pushing real personal data, secrets or private strings, or trusting prose that claims the content is clean.
+- `content-free-push-after-approval`: Pushing a collapse, or a rebase onto a base that merely moved, to a PR that holds its 1 required approval when the tree would not change.
+- `bare-force-push`: Force-pushing without `--force-with-lease=<branch>:<inspected-sha>`.
+- `admin-bypass`: Merging, pushing or rewriting with admin privileges to get around protection, checks or hooks.
+- `bypass-hook`: Skipping or redirecting verification by any route, or retrying a rejected commit or push another way.
+- `machine-specific-paths`: Hard-coding home directories, private scripts or services.
+- `commit-foreign-edits`: Committing changes this run did not make.
