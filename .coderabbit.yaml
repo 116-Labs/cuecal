@@ -1,0 +1,18 @@
+# CodeRabbit runs beside gaal's review bot, whose revise round (revise-pr)
+# works every open review thread, and gaal holds a merge while any thread is
+# open. These settings stop CodeRabbit from feeding that loop on every push.
+#
+# - One review per PR. Re-reviewing each push finds fresh edge cases in the
+#   code the last revise round wrote, so the loop runs to its round cap (seen
+#   on offlinecv #1081). Comment `@coderabbitai review` for another pass.
+# - No unprompted replies. It still answers when mentioned.
+#
+# `inheritance: true` merges this file over the settings in CodeRabbit's web UI.
+# Without it the file replaces them, and anything set only there reverts to the
+# default.
+inheritance: true
+reviews:
+  auto_review:
+    auto_incremental_review: false
+chat:
+  auto_reply: false
