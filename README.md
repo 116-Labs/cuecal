@@ -93,3 +93,7 @@ uv run pytest
 ```
 
 CI runs both gates on every push and pull request. Commits follow [Conventional Commits](https://www.conventionalcommits.org/), and each pull request lands as a single commit.
+
+## License
+
+CueCal is pre-release and not yet licensed for reuse. The source is visible so the project can be developed in the open, but no license is granted yet: all rights are reserved until the first shareable version ships with an open-source license.

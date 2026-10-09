@@ -1,0 +1,2 @@
+# False positive: nextSyncToken in a synthetic fixture (decodes to me@example.com).
+fd3e797e23ecb4f72e1c0f7a37173e67d9ad32be:tests/fixtures/calendar/calendar_list.json:generic-api-key:4
