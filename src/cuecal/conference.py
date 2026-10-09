@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from cuecal.config import ConferenceConfig
+from cuecal.extract.tier0 import find_links
 
 MEET_HOST = "meet.google.com"
 MIRROR_PROPERTY = "cuecalMirror"
@@ -65,6 +66,13 @@ def event_conference_uris(event: dict[str, Any]) -> list[str]:
         if uri and uri not in uris:
             uris.append(uri)
     return uris
+
+
+def event_meeting_ids(event: dict[str, Any]) -> tuple[str, ...]:
+    """Every Zoom/Meet/Teams meeting ID in the event's conference data, location and description."""
+    parts = [*event_conference_uris(event), event.get("location") or ""]
+    parts.append(event.get("description") or "")
+    return tuple(link.meeting_id for link in find_links("\n".join(parts)))
 
 
 def event_providers(event: dict[str, Any]) -> set[str]:

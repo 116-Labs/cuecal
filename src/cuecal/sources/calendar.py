@@ -26,9 +26,8 @@ from typing import Any
 from dateutil import parser as dateparser
 
 from cuecal import db
-from cuecal.conference import MIRROR_PROPERTY, event_conference_uris
+from cuecal.conference import MIRROR_PROPERTY, event_conference_uris, event_meeting_ids
 from cuecal.config import MirrorConfig
-from cuecal.extract.tier0 import find_links
 from cuecal.models import Message
 from cuecal.sinks.google import SAME_MEETING_WINDOW, GoogleCalendarSink
 
@@ -168,10 +167,8 @@ def conference_link(event: dict[str, Any]) -> str | None:
 
 def meeting_id_for(event: dict[str, Any]) -> str | None:
     """Parse a Zoom/Meet/Teams meeting ID the same way the extractor does, for #10 dedupe."""
-    parts = [*event_conference_uris(event), event.get("location") or ""]
-    parts.append(event.get("description") or "")
-    links = find_links("\n".join(parts))
-    return links[0].meeting_id if links else None
+    ids = event_meeting_ids(event)
+    return ids[0] if ids else None
 
 
 def _attendee_line(a: dict[str, Any]) -> str:

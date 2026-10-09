@@ -54,6 +54,8 @@ def is_duplicate(candidate: MeetingCandidate, sink: Sink, conn: sqlite3.Connecti
             if ev.start:
                 diff = (ev.start - candidate.start).total_seconds()
                 if abs(diff) <= 900:  # 15 minutes
+                    if candidate.meeting_id and candidate.meeting_id in ev.conference_meeting_ids:
+                        return True
                     if _similar_title(candidate.title, ev.title):
                         return True
 
