@@ -9,6 +9,9 @@
 # - Never approve. CodeRabbit's App can write, so GitHub would count its
 #   approval towards the `main-protection` ruleset; gaal's review bot is the
 #   approver. (gaal itself already ignores it: its association is NONE.)
+# - Autofix on. "Fix CodeRabbit comments" pushes fixes for its own findings.
+#   A push dismisses gaal's approval, so gaal re-reviews the new head before
+#   anything merges.
 #
 # `inheritance: true` merges this file over the settings in CodeRabbit's web UI.
 # Without it the file replaces them, and anything set only there reverts to the
@@ -18,5 +21,8 @@ reviews:
   request_changes_workflow: false
   auto_review:
     auto_incremental_review: false
+  finishing_touches:
+    autofix:
+      enabled: true
 chat:
   auto_reply: false
