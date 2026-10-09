@@ -3,9 +3,7 @@
 schema_version: 1
 repo: 116-Labs/cuecal
 default_branch: main
-visibility: private
-identities:
-  push: ["116-labs-gaal-push[bot]"]
+visibility: public
 tracker:
   kind: github
 gates:
@@ -16,6 +14,9 @@ gates:
     command: uv run pytest
     required: true
 preflight: []
+install:
+  - name: uv
+    command: uv sync --locked
 commits:
   single_commit: true
   attribution: none
@@ -23,16 +24,24 @@ commits:
 branches:
   prefix: gaal/
 merge:
-  auto: true
   queue: false
   method: squash
   message_source: commits
+  auto: true
 review:
-  identity: { reviewer: separate, login: "116-labs-gaal-review[bot]" }
   required_approvals: 1
-  threads_block_merge: false
+  threads_block_merge: true
   reviewers: []
   start_signal: reaction
+  identity:
+    reviewer: separate
+    login: 116-labs-gaal-review[bot]
+  dismiss_stale_approvals: true
+  require_last_push_approval: false
+  code_owner_reviews: true
+  required_checks:
+    - test
+    - zizmor
 limits:
   implement_attempts: 3
   revise_rounds: 3
@@ -44,5 +53,8 @@ harnesses:
   - claude-code
   - codex
   - antigravity
+identities:
+  push:
+    - 116-labs-gaal-push[bot]
 okfmem:
   enabled: false
