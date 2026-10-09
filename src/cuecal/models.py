@@ -97,6 +97,7 @@ class SinkEvent:
     start: datetime
     end: datetime
     cuecal_meeting_id: str | None = None
+    conference_meeting_id: str | None = None
 
 class Sink(Protocol):
     name: str

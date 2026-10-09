@@ -20,6 +20,7 @@ class SinkEvent:
     meeting_id: str | None = None
     html_link: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    conference_meeting_id: str | None = None
 
 
 @runtime_checkable
