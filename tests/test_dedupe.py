@@ -176,6 +176,30 @@ def _no_links_conn() -> sqlite3.Connection:
             },
             "abc-defg-hij",
         ),
+        (
+            {
+                "location": "https://zoom.us/j/81234567890",
+                "hangoutLink": "https://meet.google.com/abc-defg-hij",
+                "conferenceData": {
+                    "entryPoints": [
+                        {
+                            "entryPointType": "video",
+                            "uri": "https://meet.google.com/abc-defg-hij",
+                        }
+                    ]
+                },
+            },
+            "81234567890",
+        ),
+        (
+            {
+                "description": (
+                    "Dial-in: https://teams.live.com/meet/9876543210\n"
+                    "Join: https://zoom.us/j/81234567890"
+                )
+            },
+            "81234567890",
+        ),
     ],
 )
 def test_dedupe_tier3_conference_id_beats_dissimilar_title(extra, meeting_id):

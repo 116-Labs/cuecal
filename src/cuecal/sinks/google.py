@@ -20,6 +20,7 @@ from cuecal.conference import (
     ConferencePlan,
     _provider_for_uri,
     event_conference_uris,
+    event_meeting_ids,
     meet_join_url,
     normalize_meet_code,
     plan_conference,
@@ -496,14 +497,11 @@ class GoogleCalendarSink:
         }
         resp = self._request("GET", f"/calendars/{encoded_cal}/events", params=params)
         items = resp.get("items", [])
-        # Imported here: sources.calendar imports this module.
-        from cuecal.sources.calendar import meeting_id_for
-
         events = []
         for item in items:
             if item.get("status") == "cancelled":
                 continue
             ev = parse_calendar_event(item)
-            ev.conference_meeting_id = meeting_id_for(item)
+            ev.conference_meeting_ids = event_meeting_ids(item)
             events.append(ev)
         return events
