@@ -1,0 +1,21 @@
+# Paths whose mistakes can't be undone by a follow-up commit. Enforced by the
+# `main-protection` ruleset ("Require review from Code Owners").
+
+# Workflows run with repo secrets and tokens.
+/.github/ @s-annam
+
+# gaal's profile decides what merges without a human.
+/.gaal/ @s-annam
+
+# Secrets and OAuth: keyring access, token handling, the guard that refuses
+# raw tokens in config.
+/src/cuecal/secrets.py @s-annam
+/src/cuecal/config.py @s-annam
+
+# Fixtures: the repo is public, so a fixture with real message data leaks the
+# moment it merges. Fixtures must stay synthetic (example.com, Alice/Bob).
+/tests/fixtures/ @s-annam
+
+# Local guards for Claude Code sessions.
+/scripts/hooks/ @s-annam
+/.claude/settings.json @s-annam

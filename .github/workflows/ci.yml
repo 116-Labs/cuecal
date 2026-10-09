@@ -4,11 +4,42 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv run ruff check .
       - run: uv run pytest
+
+  # Static audit of the workflows themselves: the repo is public, so an
+  # unpinned action or an over-broad token is a real exposure. Fails on any
+  # finding. A by-design exception is suppressed inline, at the line, with its
+  # reason (`# zizmor: ignore[<audit>]`), never in a global config.
+  zizmor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Online audits (impostor commits, known-vulnerable actions) query the API.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          # Fail the job on findings instead of uploading SARIF to code scanning.
+          advanced-security: false
+          inputs: .github
+          collect: all
+          # Pinned so a new zizmor audit lands in a PR that bumps this, not as a
+          # surprise red on an unrelated one.
+          version: 1.30.1
