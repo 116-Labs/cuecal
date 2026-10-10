@@ -440,5 +440,51 @@ def test_task_status_tolerates_unreadable_task_info(windows, tmp_path):
     status = service.get_service_status(conn=conn, secondary_sinks=[])
     assert status["installed"] is True
     assert status["task_last_run"] is None
-    assert "task last run: never" in service.format_status(status)
+    assert status["task_info_error"] == "Get-ScheduledTaskInfo printed no JSON object"
+
+    output = service.format_status(status)
+    assert (
+        "task last run: unknown (could not read task info: "
+        "Get-ScheduledTaskInfo printed no JSON object)"
+    ) in output
+    assert "task next run: unknown" in output
+    assert "task last run: never" not in output
+    assert "none scheduled" not in output
+    conn.close()
+
+
+def test_task_status_reports_failed_task_info_query(monkeypatch, tmp_path):
+    def fake_run(args, **kwargs):
+        if args[0] == "powershell.exe":
+            stderr = "Get-ScheduledTaskInfo : Access is denied.\r\nAt line:1 char:6\r\n"
+            return subprocess.CompletedProcess(args, 1, "", stderr)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(service, "_platform", lambda: "win32")
+    monkeypatch.setattr(service.subprocess, "run", fake_run)
+    conn = db.connect(tmp_path / "state.db")
+    status = service.get_service_status(conn=conn, secondary_sinks=[])
+    assert status["installed"] is True
+    output = service.format_status(status)
+    assert (
+        "task last run: unknown (could not read task info: "
+        "Get-ScheduledTaskInfo failed: Get-ScheduledTaskInfo : Access is denied.)"
+    ) in output
+    assert "task next run: unknown" in output
+    conn.close()
+
+
+def test_task_status_reports_missing_powershell(monkeypatch, tmp_path):
+    def fake_run(args, **kwargs):
+        if args[0] == "powershell.exe":
+            raise FileNotFoundError(args[0])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(service, "_platform", lambda: "win32")
+    monkeypatch.setattr(service.subprocess, "run", fake_run)
+    conn = db.connect(tmp_path / "state.db")
+    status = service.get_service_status(conn=conn, secondary_sinks=[])
+    assert status["installed"] is True
+    assert status["task_info_error"].startswith("powershell.exe failed:")
+    assert "task next run: unknown" in service.format_status(status)
     conn.close()

@@ -332,21 +332,32 @@ def uninstall_task(*, task_name: str = TASK_NAME) -> bool:
 
 
 def _task_info(task_name: str) -> dict[str, Any]:
+    """Read the task's run info. Raises ServiceError when it cannot be read."""
     script = _TASK_INFO_SCRIPT.format(name=task_name.replace("'", "''"))
     result = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
     if result.returncode != 0:
-        return {}
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        reason = detail[0] if detail else f"exit code {result.returncode}"
+        raise ServiceError(f"Get-ScheduledTaskInfo failed: {reason}")
     try:
         info = json.loads(result.stdout)
     except ValueError:
-        return {}
-    return info if isinstance(info, dict) else {}
+        info = None
+    if not isinstance(info, dict):
+        raise ServiceError("Get-ScheduledTaskInfo printed no JSON object")
+    return info
 
 
 def _task_status(task_name: str, log_dir: Path | None) -> dict[str, Any]:
     log_d = log_dir or paths.log_dir()
     installed = _task_registered(task_name)
-    info = _task_info(task_name) if installed else {}
+    info: dict[str, Any] = {}
+    info_error = None
+    if installed:
+        try:
+            info = _task_info(task_name)
+        except ServiceError as exc:
+            info_error = str(exc)
     last_result = info.get("last_result")
     if last_result == _TASK_HAS_NOT_RUN:
         last_result = None
@@ -357,6 +368,7 @@ def _task_status(task_name: str, log_dir: Path | None) -> dict[str, Any]:
         "task_last_run": info.get("last_run"),
         "task_last_result": last_result,
         "task_next_run": info.get("next_run"),
+        "task_info_error": info_error,
         "stdout_path": str(log_d / "cuecal.stdout.log"),
         "stderr_path": str(log_d / "cuecal.stderr.log"),
     }
@@ -500,13 +512,21 @@ def _format_manager_status(status: dict[str, Any]) -> list[str]:
             lines.append("service: installed (Task Scheduler)")
             lines.append(f"task: {status['task_name']}")
             last = status.get("task_last_run")
-            if last:
-                result = status.get("task_last_result")
-                suffix = f" (result {_format_task_result(result)})" if result is not None else ""
-                lines.append(f"task last run: {last}{suffix}")
+            info_error = status.get("task_info_error")
+            if info_error:
+                # Unreadable info says nothing about the runs, so claim neither "never" nor "none".
+                lines.append(f"task last run: unknown (could not read task info: {info_error})")
+                lines.append("task next run: unknown")
             else:
-                lines.append("task last run: never")
-            lines.append(f"task next run: {status.get('task_next_run') or 'none scheduled'}")
+                if last:
+                    result = status.get("task_last_result")
+                    suffix = (
+                        f" (result {_format_task_result(result)})" if result is not None else ""
+                    )
+                    lines.append(f"task last run: {last}{suffix}")
+                else:
+                    lines.append("task last run: never")
+                lines.append(f"task next run: {status.get('task_next_run') or 'none scheduled'}")
             lines.append(f"stdout: {status['stdout_path']}")
             lines.append(f"stderr: {status['stderr_path']}")
         else:
