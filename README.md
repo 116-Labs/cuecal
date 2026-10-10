@@ -52,6 +52,16 @@ The v1 epic is [#1](https://github.com/116-Labs/cuecal/issues/1). Beyond v1: res
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
+### Install a published release
+
+Each [release](https://github.com/116-Labs/cuecal/releases) attaches a wheel that installs on macOS, Windows and Linux:
+
+```sh
+uv tool install https://github.com/116-Labs/cuecal/releases/download/v<version>/cuecal-<version>-py3-none-any.whl
+```
+
+Maintainers publish releases from a Mac with `scripts/release.sh` (`--dry-run` builds and smoke-tests without publishing).
+
 ### 1. Install as a standalone CLI command (Recommended)
 
 ```sh
