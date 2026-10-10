@@ -489,21 +489,26 @@ def cmd_edit(args: argparse.Namespace) -> int:
 
 
 def cmd_service(args: argparse.Namespace) -> int:
-    if args.action == "install":
-        plist = service.install_service()
-        print(f"installed launchd service: {plist}")
-        return 0
-    if args.action == "uninstall":
-        removed = service.uninstall_service()
-        if removed:
-            print("uninstalled launchd service")
-        else:
-            print("service was not installed")
-        return 0
-    if args.action == "status":
-        st = service.get_service_status()
-        print(service.format_status(st))
-        return 0
+    try:
+        backend = service.BACKEND_LABELS[service.service_backend()]
+        if args.action == "install":
+            where = service.install_service()
+            print(f"installed {backend} service: {where}")
+            return 0
+        if args.action == "uninstall":
+            removed = service.uninstall_service()
+            if removed:
+                print(f"uninstalled {backend} service")
+            else:
+                print("service was not installed")
+            return 0
+        if args.action == "status":
+            st = service.get_service_status()
+            print(service.format_status(st))
+            return 0
+    except service.ServiceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return _not_implemented(f"service {args.action}")
 
 

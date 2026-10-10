@@ -14,6 +14,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CUECAL_LOCK_PATH", str(tmp_path / "cuecal.lock"))
     monkeypatch.setattr(registry, "_registry", {kind: {} for kind in registry.KINDS})
     monkeypatch.setattr("cuecal.notify.DesktopNotifier.send", lambda self, notification: None)
+    # The launchd backend writes only a plist file, so it runs on any host.
+    monkeypatch.setattr("cuecal.service._platform", lambda: "darwin")
 
 
 def test_help_lists_subcommands(capsys):
@@ -122,6 +124,73 @@ def test_cli_service_lifecycle(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "uninstalled launchd service" in out
     assert not (tmp_path / "com.cuecal.agent.plist").exists()
+
+
+@pytest.mark.parametrize("action", ["install", "uninstall", "status"])
+def test_cli_service_unsupported_platform(monkeypatch, tmp_path, capsys, action):
+    monkeypatch.setattr("cuecal.service._platform", lambda: "linux")
+    assert cli.main(["service", action]) == 1
+    captured = capsys.readouterr()
+    assert "not supported on linux" in captured.err
+    assert "installed" not in captured.out
+    assert not (tmp_path / "com.cuecal.agent.plist").exists()
+
+
+def test_cli_service_lifecycle_windows(monkeypatch, capsys):
+    import subprocess
+
+    registered = {"value": False}
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        rc = 0
+        stdout = ""
+        if args[:2] == ["schtasks", "/Create"]:
+            registered["value"] = True
+        elif args[:2] == ["schtasks", "/Delete"]:
+            registered["value"] = False
+        elif args[:2] == ["schtasks", "/Query"]:
+            rc = 0 if registered["value"] else 1
+        elif args[0] == "powershell.exe":
+            stdout = '{"last_run":null,"last_result":267011,"next_run":"2026-10-11T09:05:00"}'
+        return subprocess.CompletedProcess(args, rc, stdout, "")
+
+    monkeypatch.setattr("cuecal.service._platform", lambda: "win32")
+    monkeypatch.setattr("cuecal.service.subprocess.run", fake_run)
+    monkeypatch.setenv("CUECAL_BIN", "C:/Users/me/.local/bin/cuecal.exe")
+
+    assert cli.main(["service", "status"]) == 0
+    assert "service: not installed (Task Scheduler)" in capsys.readouterr().out
+
+    assert cli.main(["service", "install"]) == 0
+    assert "installed Task Scheduler service: CueCal" in capsys.readouterr().out
+
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "service: installed (Task Scheduler)" in out
+    assert "task last run: never" in out
+    assert "task next run: 2026-10-11T09:05:00" in out
+
+    assert cli.main(["service", "uninstall"]) == 0
+    assert "uninstalled Task Scheduler service" in capsys.readouterr().out
+    assert cli.main(["service", "uninstall"]) == 0
+    assert "service was not installed" in capsys.readouterr().out
+    assert not any(args[0] == "launchctl" for args in calls)
+
+
+def test_cli_service_install_windows_reports_schtasks_failure(monkeypatch, capsys):
+    import subprocess
+
+    monkeypatch.setattr("cuecal.service._platform", lambda: "win32")
+    monkeypatch.setattr(
+        "cuecal.service.subprocess.run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "ERROR: Access is denied."),
+    )
+    assert cli.main(["service", "install"]) == 1
+    captured = capsys.readouterr()
+    assert "schtasks /Create failed: ERROR: Access is denied." in captured.err
+    assert "installed" not in captured.out
 
 
 def test_cli_run_once(tmp_path, capsys):
