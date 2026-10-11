@@ -56,5 +56,7 @@ harnesses:
 identities:
   push:
     - 116-labs-gaal-push[bot]
+  review:
+    - 116-labs-gaal-review[bot]
 okfmem:
   enabled: false
