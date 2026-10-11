@@ -34,6 +34,24 @@ def test_version_prints_version(capsys):
     assert capsys.readouterr().out == f"cuecal {__version__}\n"
 
 
+def test_main_registers_entry_point_plugins_before_non_doctor_command(monkeypatch):
+    def load_entry_points():
+        registry.register("sinks", "google-calendar", object())
+        registry.register("sources", "gmail", object())
+        return []
+
+    monkeypatch.setattr(registry, "load_entry_points", load_entry_points)
+
+    def init_before_dispatch(args):
+        registered = registry.registered()
+        assert "google-calendar" in registered["sinks"]
+        assert "gmail" in registered["sources"]
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_init", init_before_dispatch)
+    assert cli.main(["init"]) == 0
+
+
 def test_doctor_reports_paths_backend_and_plugins(tmp_path, capsys):
     registry.register("sinks", "ics", object())
     assert cli.main(["init"]) == 0
@@ -63,6 +81,25 @@ def test_doctor_reports_broken_plugin(monkeypatch, capsys):
     capsys.readouterr()
     assert cli.main(["doctor"]) == 1
     assert "broken plugin: sinks/bad" in capsys.readouterr().out
+
+
+def test_main_warns_about_broken_plugin_before_non_doctor_command(monkeypatch, caplog):
+    class BadEntryPoint:
+        name = "bad"
+
+        def load(self):
+            raise ImportError("boom")
+
+    monkeypatch.setattr(
+        registry,
+        "entry_points",
+        lambda group: [BadEntryPoint()] if group == "cuecal.sinks" else [],
+    )
+
+    with caplog.at_level("WARNING", logger="cuecal.cli"):
+        assert cli.main(["init"]) == 0
+
+    assert "failed to load sinks plugin 'bad'" in caplog.text
 
 
 @pytest.mark.parametrize(

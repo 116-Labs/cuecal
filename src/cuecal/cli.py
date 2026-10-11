@@ -676,7 +676,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 - doctor must report, not crash
         ok = False
         print(f"keyring backend: unavailable ({exc})")
-    for kind, name, exc in registry.load_entry_points():
+    entry_point_errors = getattr(args, "entry_point_errors", None)
+    if entry_point_errors is None:
+        entry_point_errors = registry.load_entry_points()
+    for kind, name, exc in entry_point_errors:
         ok = False
         print(f"broken plugin: {kind}/{name} ({exc!r})")
     for kind, names in registry.registered().items():
@@ -779,6 +782,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log.configure(args.verbose)
+    # Sources and sinks advertised by installed packages must be available to every command,
+    # not just doctor, before command dispatch resolves them by name.
+    args.entry_point_errors = registry.load_entry_points()
+    for kind, name, exc in args.entry_point_errors:
+        logger.warning("failed to load %s plugin %r: %r", kind, name, exc)
     return args.func(args)
 
 
