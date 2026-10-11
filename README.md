@@ -54,7 +54,19 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ### Install a published release
 
-Each [release](https://github.com/116-Labs/cuecal/releases) attaches a wheel that installs on macOS, Windows and Linux:
+The `release` branch always points at the newest published [release](https://github.com/116-Labs/cuecal/releases), so one command installs it on macOS, Windows and Linux (it needs `git` on your machine):
+
+```sh
+uv tool install git+https://github.com/116-Labs/cuecal@release
+```
+
+To upgrade to the newest release:
+
+```sh
+uv tool upgrade cuecal
+```
+
+Without git, install the wheel attached to a release instead (the URL changes with each version):
 
 ```sh
 uv tool install https://github.com/116-Labs/cuecal/releases/download/v<version>/cuecal-<version>-py3-none-any.whl

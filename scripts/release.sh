@@ -11,8 +11,12 @@
 # The version is the one in pyproject.toml; bump it (and cuecal.__version__)
 # in a PR first. It refuses to publish a version whose tag already exists.
 #
-# Users install a release with:
-#   uv tool install https://github.com/116-Labs/cuecal/releases/download/v<version>/cuecal-<version>-py3-none-any.whl
+# Once the Release exists, it force-pushes the `release` branch to the released
+# commit, so `release` always points at the newest published release.
+#
+# Users install the newest release, and upgrade, with:
+#   uv tool install git+https://github.com/116-Labs/cuecal@release
+#   uv tool upgrade cuecal
 #
 # Usage: ./scripts/release.sh [--dry-run]
 #   --dry-run  build, check and smoke-test, but tag and publish nothing
@@ -26,7 +30,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --dry-run) DRY_RUN=true ;;
     --help | -h)
-      sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -136,4 +140,14 @@ fi
 gh release create "v$VERSION" "$WHEEL" "$SDIST" \
   --repo "$REPO" --target "$SHA" --title "v$VERSION" --generate-notes
 echo "release: published v$VERSION from ${SHA:0:7}."
-echo "release: install with uv tool install https://github.com/$REPO/releases/download/v$VERSION/$(basename "$WHEEL")"
+
+# Only after the Release exists: `release` must never point at an unpublished
+# commit. The branch is force-pushed because it simply tracks the newest release.
+git -C "$REPO_ROOT" push -f origin "$SHA:refs/heads/release" || {
+  echo "release: v$VERSION is published but the release branch did not move." >&2
+  echo "release: re-running is refused (already tagged); run this by hand:" >&2
+  echo "release:   git push -f origin $SHA:refs/heads/release" >&2
+  exit 1
+}
+echo "release: moved the release branch to ${SHA:0:7}."
+echo "release: install with uv tool install git+https://github.com/$REPO@release"
