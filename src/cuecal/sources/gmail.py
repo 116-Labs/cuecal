@@ -18,7 +18,7 @@ from typing import Any
 
 from dateutil import parser as dateparser
 
-from cuecal import secrets
+from cuecal import __version__, secrets
 from cuecal.models import Message
 
 logger = logging.getLogger("cuecal.sources.gmail")
@@ -308,7 +308,7 @@ class GmailSource:
         token = self._get_token()
         headers = {
             "Accept": "application/json",
-            "User-Agent": "cuecal/0.1.0",
+            "User-Agent": f"cuecal/{__version__}",
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
