@@ -85,7 +85,16 @@ uv run cuecal init
 uv run cuecal doctor
 ```
 
-Working today: `init`, `doctor`, `auth slack`, `run --once`. Stubs until their issues land: `auth google` (#51), `pending` (#40), `service install|uninstall` (#11). Every command accepts `--dry-run` and `-v/--verbose`.
+Working today: `init`, `doctor`, `auth slack`, `run --once`, `service install|uninstall|status`. Stubs until their issues land: `auth google` (#51), `pending` (#40). Every command accepts `--dry-run` and `-v/--verbose`.
+
+### Background service
+
+`cuecal service install` runs `cuecal run --once` every `poll_interval_seconds`, appending its output to `cuecal.stdout.log` and `cuecal.stderr.log` in the platform log dir:
+
+- **macOS:** a launchd agent (`~/Library/LaunchAgents/com.cuecal.agent.plist`).
+- **Windows:** a Task Scheduler task named `CueCal`, run as the installing user only while they are logged on (so it can read their Credential Manager vault), from logon and from install time, rounded up to whole minutes. It launches through `conhost.exe --headless`, so no console window flashes. Install it from a desktop session, not over SSH.
+
+Other platforms exit non-zero with "not supported". `cuecal service status` shows the service state (on Windows also the task's last result and next run) and run statistics, and `cuecal service uninstall` removes it.
 
 ### Config and data
 
