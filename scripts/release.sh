@@ -143,6 +143,11 @@ echo "release: published v$VERSION from ${SHA:0:7}."
 
 # Only after the Release exists: `release` must never point at an unpublished
 # commit. The branch is force-pushed because it simply tracks the newest release.
-git -C "$REPO_ROOT" push -f origin "$SHA:refs/heads/release"
+git -C "$REPO_ROOT" push -f origin "$SHA:refs/heads/release" || {
+  echo "release: v$VERSION is published but the release branch did not move." >&2
+  echo "release: re-running is refused (already tagged); run this by hand:" >&2
+  echo "release:   git push -f origin $SHA:refs/heads/release" >&2
+  exit 1
+}
 echo "release: moved the release branch to ${SHA:0:7}."
 echo "release: install with uv tool install git+https://github.com/$REPO@release"
