@@ -66,10 +66,13 @@ def test_doctor_reports_paths_backend_and_plugins(tmp_path, capsys):
 
 
 def test_doctor_reports_broken_plugin(monkeypatch, capsys):
+    loads = []
+
     class BadEntryPoint:
         name = "bad"
 
         def load(self):
+            loads.append(self.name)
             raise ImportError("boom")
 
     monkeypatch.setattr(
@@ -79,8 +82,11 @@ def test_doctor_reports_broken_plugin(monkeypatch, capsys):
     )
     assert cli.main(["init"]) == 0
     capsys.readouterr()
+    loads.clear()
     assert cli.main(["doctor"]) == 1
     assert "broken plugin: sinks/bad" in capsys.readouterr().out
+    # main() already loaded entry points; doctor reports those errors rather than loading again.
+    assert loads == ["bad"]
 
 
 def test_main_warns_about_broken_plugin_before_non_doctor_command(monkeypatch, caplog):
