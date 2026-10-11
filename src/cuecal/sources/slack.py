@@ -297,6 +297,9 @@ class SlackSource:
     client: SlackClient | None = None
     fetch_limit: int = 100
     latency_budget_seconds: float = 30.0
+    # search.messages rejects an empty query, so a first run with no search terms is
+    # bounded by date instead (matching the Gmail source's lookback window).
+    lookback_days: int = 7
 
     def __post_init__(self) -> None:
         if not self.token:
@@ -336,8 +339,12 @@ class SlackSource:
                 # so subtract 1 day to ensure messages from the cursor's day are included.
                 after_date = (cursor_dt.date() - timedelta(days=1)).strftime("%Y-%m-%d")
                 query = f"{base_query} after:{after_date}" if base_query else f"after:{after_date}"
-            else:
+            elif base_query:
                 query = base_query
+            else:
+                # Slack after:YYYY-MM-DD is exclusive, so step back one more day.
+                cutoff = datetime.now(UTC).date() - timedelta(days=self.lookback_days + 1)
+                query = f"after:{cutoff.strftime('%Y-%m-%d')}"
 
             page = 1
             max_pages = 10

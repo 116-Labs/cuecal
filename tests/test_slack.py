@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
@@ -226,13 +227,38 @@ def test_search_messages_cursor_date_filter_and_desc(monkeypatch):
     source.fetch_since(cursor=None)
     assert len(search_calls) == 1
     assert search_calls[0]["sort_dir"] == "desc"
-    assert "after:" not in search_calls[0]["query"]
+    # search.messages rejects an empty query, so the first run is bounded by the lookback.
+    cutoff = datetime.now(UTC).date() - timedelta(days=source.lookback_days + 1)
+    assert search_calls[0]["query"] == f"after:{cutoff:%Y-%m-%d}"
 
     # 2. With cursor (e.g. ts 1700000200 = 2023-11-14T22:16:40Z -> after:2023-11-13)
     source.fetch_since(cursor="1700000200.000200")
     assert len(search_calls) == 2
     assert search_calls[1]["sort_dir"] == "desc"
-    assert "after:2023-11-13" in search_calls[1]["query"]
+    assert search_calls[1]["query"] == "after:2023-11-13"
+
+
+def test_search_messages_first_run_with_terms_has_no_date_bound(monkeypatch):
+    client = SlackClient(token="xoxp-fake")
+    search_calls: list[dict | None] = []
+
+    def mock_request(endpoint: str, params: dict | None = None):
+        if endpoint == "search.messages":
+            search_calls.append(params)
+            return {"ok": True, "messages": {"matches": [], "paging": {"pages": 1}}}
+        return {"ok": True}
+
+    monkeypatch.setattr(client, "_request", mock_request)
+    source = SlackSource(
+        token="xoxp-fake",
+        client=client,
+        query_builder=SlackQueryBuilder(terms=("zoom.us",)),
+    )
+
+    source.fetch_since(cursor=None)
+    assert len(search_calls) == 1
+    assert search_calls[0]["query"] == source.query_builder.build_query()
+    assert "after:" not in search_calls[0]["query"]
 
 
 # --- AC 2: Rate-limit backoff covered by a test ---
