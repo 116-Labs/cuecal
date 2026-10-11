@@ -15,7 +15,7 @@ from typing import Any
 
 from dateutil import parser as dateparser
 
-from cuecal import secrets
+from cuecal import __version__, secrets
 from cuecal.conference import (
     ConferencePlan,
     _provider_for_uri,
@@ -184,7 +184,7 @@ class GoogleCalendarSink:
         token = self._get_token()
         headers = {
             "Accept": "application/json",
-            "User-Agent": "cuecal/0.1.0",
+            "User-Agent": f"cuecal/{__version__}",
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"

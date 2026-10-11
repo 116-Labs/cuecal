@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cuecal import secrets
+from cuecal import __version__, secrets
 from cuecal.models import MeetingCandidate
 from cuecal.sinks import GoogleCalendarSink, Sink, SinkEvent
 from cuecal.sinks.google import parse_calendar_event
@@ -409,6 +409,6 @@ def test_raw_urllib_request_dispatch():
         assert mock_urlopen.called
         req = mock_urlopen.call_args[0][0]
         assert req.headers.get("Authorization") == "Bearer test-secret-token"
-        assert req.headers.get("User-agent") == "cuecal/0.1.0"
+        assert req.headers.get("User-agent") == f"cuecal/{__version__}"
         assert event is not None
         assert event.id == "event_raw"

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from cuecal import registry, secrets
+from cuecal import __version__, registry, secrets
 from cuecal.models import Message
 
 logger = logging.getLogger("cuecal.sources.slack")
@@ -168,7 +168,7 @@ class SlackClient:
             url,
             headers={
                 "Authorization": f"Bearer {self.token}",
-                "User-Agent": "cuecal/0.1.0",
+                "User-Agent": f"cuecal/{__version__}",
                 "Content-Type": "application/json; charset=utf-8",
             },
         )
