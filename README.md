@@ -2,7 +2,7 @@
 
 Local-first agent that finds meeting invites buried in chat and email (Gmail, Slack, Zoho, any MCP source) and puts them on your calendar. Deterministic parsing and a small local model do the work; a paid LLM runs only on escalation.
 
-> **Status: pre-alpha.** The scaffold and the deterministic extractor have landed. Sources, sinks and the background service are still in progress, so `cuecal run` does not do anything yet. See [Status](#status).
+> **Status: pre-alpha (v0.1.1).** The deterministic extractor, the Gmail, Slack and MCP sources, the Google Calendar sink, the pending queue and the background service have landed, so `cuecal run --once` polls your sources and writes events. The interactive Google OAuth flow, the LLM tiers and the eval runner are still open. See [Status](#status).
 
 ## Why
 
@@ -30,7 +30,7 @@ Secrets: OS keychain via keyring, never in the config file
 - **Tier 2: local LLM.** A small model on Ollama fills in only what parsing couldn't (time, title, attendees) as strict JSON.
 - **Tier 3: paid LLM.** Runs only when Tier 2 fails validation or reports low confidence, under a per-day cap.
 - **Routing.** Every candidate passes a validation gate (schema, future start, resolvable timezone, end after start, confidence threshold). High-confidence events are created; the rest go to a pending queue you approve or reject.
-- **Dedupe.** The same meeting often arrives from both chat and email. CueCal matches on meeting ID first, then on its own marker stored on the calendar event, then on start time and title.
+- **Dedupe.** The same meeting often arrives from both chat and email. CueCal matches on meeting ID first, then on its own marker stored on the calendar event, then on start time and title. The start-time and title match is implemented in `dedupe.py` but `cuecal run` applies only the first two today.
 
 Nothing is tied to one person's setup: accounts, calendars, sources, models and thresholds are all configuration.
 
@@ -40,13 +40,18 @@ Nothing is tied to one person's setup: accounts, calendars, sources, models and 
 |---|---|
 | Package, CLI, config, keyring secrets, SQLite state, plugin registry | Done |
 | Extractor Tier 0 (link regex) and Tier 1 (`.ics` + templates) | Done |
-| Tier 0 decision model (Laya) replacing the regex gate | Planned ([#21](https://github.com/116-Labs/cuecal/issues/21)) |
-| Gmail, Slack and generic MCP (Zoho Mail/Cliq) sources | In progress ([#3](https://github.com/116-Labs/cuecal/issues/3), [#4](https://github.com/116-Labs/cuecal/issues/4), [#5](https://github.com/116-Labs/cuecal/issues/5)) |
-| Eval fixture set, Tiers 2–3 | In progress ([#7](https://github.com/116-Labs/cuecal/issues/7), [#8](https://github.com/116-Labs/cuecal/issues/8)) |
-| Google Calendar sink with OAuth | In progress ([#9](https://github.com/116-Labs/cuecal/issues/9)) |
-| Dedupe + pending queue, launchd service | In progress ([#10](https://github.com/116-Labs/cuecal/issues/10), [#11](https://github.com/116-Labs/cuecal/issues/11)) |
+| Gmail, Slack and generic MCP (Zoho Mail/Cliq) sources | Done ([#3](https://github.com/116-Labs/cuecal/issues/3), [#4](https://github.com/116-Labs/cuecal/issues/4), [#5](https://github.com/116-Labs/cuecal/issues/5)) |
+| Google Calendar sink, secondary-sink fan-out with per-sink retry | Landed ([#42](https://github.com/116-Labs/cuecal/issues/42)); the interactive OAuth flow and calendar picker from [#9](https://github.com/116-Labs/cuecal/issues/9) are open as [#51](https://github.com/116-Labs/cuecal/issues/51) |
+| Dedupe, pending queue (`pending`, `approve`, `reject`, `edit`), desktop and ntfy notifications | Done ([#10](https://github.com/116-Labs/cuecal/issues/10)) |
+| Near-miss capture and `misses` / `missed` feedback commands | Done ([#46](https://github.com/116-Labs/cuecal/issues/46)) |
+| Mirroring secondary calendars into the target calendar | Landed ([#17](https://github.com/116-Labs/cuecal/issues/17) stays open for a manual check) |
+| Google Meet provisioning and provider replacement | Landed in the sink ([#43](https://github.com/116-Labs/cuecal/issues/43)); not yet called from `cuecal run` |
+| Background service: launchd on macOS, Task Scheduler on Windows | Done ([#11](https://github.com/116-Labs/cuecal/issues/11), [#79](https://github.com/116-Labs/cuecal/issues/79)) |
+| Eval fixture schema and dataset staging | Landed; fixture corpus ([#36](https://github.com/116-Labs/cuecal/issues/36)) and `cuecal eval` runner ([#37](https://github.com/116-Labs/cuecal/issues/37)) open under [#7](https://github.com/116-Labs/cuecal/issues/7) |
+| Tier 0 decision model (Clef-flash primary, Laya baseline) replacing the regex gate | Planned ([#21](https://github.com/116-Labs/cuecal/issues/21), [#47](https://github.com/116-Labs/cuecal/issues/47)) |
+| Tiers 2–3 (local LLM on Ollama, paid escalation) | Not started ([#8](https://github.com/116-Labs/cuecal/issues/8)) |
 
-The v1 epic is [#1](https://github.com/116-Labs/cuecal/issues/1). Beyond v1: reschedule and cancellation sync ([#12](https://github.com/116-Labs/cuecal/issues/12)), mirroring secondary calendars into the target calendar ([#17](https://github.com/116-Labs/cuecal/issues/17)), and provisioning a preferred conference link and propagating it to Zoho Calendar ([#20](https://github.com/116-Labs/cuecal/issues/20)).
+The v1 epic is [#1](https://github.com/116-Labs/cuecal/issues/1). Beyond v1: reschedule and cancellation sync ([#12](https://github.com/116-Labs/cuecal/issues/12)), a Zoho Calendar sink ([#44](https://github.com/116-Labs/cuecal/issues/44)) and propagating the preferred conference link to it ([#20](https://github.com/116-Labs/cuecal/issues/20)), and local model hosting on the Windows box ([#78](https://github.com/116-Labs/cuecal/issues/78)).
 
 ## Quickstart
 
@@ -97,7 +102,7 @@ uv run cuecal init
 uv run cuecal doctor
 ```
 
-Working today: `init`, `doctor`, `auth slack`, `run --once`, `service install|uninstall|status`. Stubs until their issues land: `auth google` (#51), `pending` (#40). Every command accepts `--dry-run` and `-v/--verbose`.
+Working today: `init`, `doctor`, `auth slack`, `run [--once]`, `pending`, `approve`, `reject`, `edit`, `misses`, `missed`, `mirror calendars|prune` and `service install|uninstall|status`. Stub until its issue lands: `auth google` ([#51](https://github.com/116-Labs/cuecal/issues/51)). Every command accepts `--dry-run` and `-v/--verbose`.
 
 ### Background service
 
@@ -115,7 +120,7 @@ Other platforms exit non-zero with "not supported". `cuecal service status` show
 | Config (TOML) | platform config dir, e.g. `~/Library/Application Support/cuecal/config.toml` on macOS | `CUECAL_CONFIG` |
 | State DB (SQLite) | platform data dir, e.g. `~/Library/Application Support/cuecal/state.db` on macOS | `CUECAL_DB` |
 
-The config holds only keyring entry *names* under `[secrets]`. CueCal refuses to load a config that contains something that looks like a raw token.
+The config holds only keyring entry *names* under `[secrets]`. CueCal refuses to load a config that contains something that looks like a raw token. Besides the top-level keys, the loader accepts the `[llm]`, `[thresholds]`, `[secrets]`, `[gmail]`, `[limits]`, `[notify]`, `[conference]` and `[mirror]` tables and rejects unknown keys; `cuecal init` writes a commented starting config.
 
 `sink` names the primary sink. `secondary_sinks` lists extra sinks that receive each event only after the primary write succeeds. A failed secondary write never undoes the primary event; it is recorded per sink in the state DB, shown with its error under `cuecal service status`, and retried automatically on the next run while the sink stays listed in `secondary_sinks`. Failures for a sink removed from that list are no longer retried and are marked as such in the status output.
 
