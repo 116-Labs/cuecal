@@ -172,6 +172,40 @@ def test_pending_crud_helpers(tmp_path):
     assert db.list_pending(conn, status="pending") == []
 
 
+def test_add_pending_dedupes_on_source_and_message(tmp_path):
+    from cuecal.models import MeetingCandidate
+
+    conn = db.connect(tmp_path / "state.db")
+    candidate = MeetingCandidate(title="Sync", confidence=0.6, meeting_id="m1")
+    first = db.add_pending(conn, candidate=candidate, source="slack", message_id="msg1")
+    assert db.find_pending_by_message(conn, source="slack", message_id="msg1")["id"] == first
+    assert db.reject_pending(conn, first)
+    assert db.add_pending(conn, candidate=candidate, source="slack", message_id="msg1") == first
+    assert len(db.list_pending(conn, status=None)) == 1
+    assert db.add_pending(conn, candidate=candidate, source="gmail", message_id="msg1") != first
+    assert db.add_pending(conn, candidate=candidate, source="slack", message_id="msg2") != first
+    assert len(db.list_pending(conn, status=None)) == 3
+    assert db.add_pending(conn, candidate=candidate, source="slack") != db.add_pending(
+        conn, candidate=candidate, source="slack"
+    )
+
+
+def test_migration_removes_pending_duplicates(tmp_path, monkeypatch):
+    conn = sqlite3.connect(tmp_path / "state.db")
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:5])
+    assert db.migrate(conn) == 5
+    for message_id in ("msg1", "msg1", "msg1", "msg2", "", ""):
+        conn.execute(
+            "INSERT INTO pending (source, message_id, candidate_json) VALUES ('slack', ?, '{}')",
+            (message_id,),
+        )
+    conn.commit()
+    monkeypatch.undo()
+    assert db.migrate(conn) == len(db.MIGRATIONS)
+    rows = conn.execute("SELECT id, message_id FROM pending ORDER BY id").fetchall()
+    assert rows == [(1, "msg1"), (4, "msg2"), (5, ""), (6, "")]
+
+
 def test_sink_delivery_helpers(tmp_path):
     conn = db.connect(tmp_path / "state.db")
     assert db.list_sink_deliveries(conn) == []

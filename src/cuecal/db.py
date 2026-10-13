@@ -95,6 +95,15 @@ MIGRATIONS: list[str] = [
         UNIQUE (meeting_id, sink)
     );
     """,
+    """
+    DELETE FROM pending
+    WHERE message_id <> ''
+      AND id NOT IN (
+        SELECT MIN(id) FROM pending WHERE message_id <> '' GROUP BY source, message_id
+      );
+    CREATE UNIQUE INDEX pending_source_message
+        ON pending (source, message_id) WHERE message_id <> '';
+    """,
 ]
 
 SINK_DELIVERY_STATUSES = ("pending", "synced", "failed")
@@ -383,17 +392,60 @@ def add_pending(
     if candidate_json is None:
         raise ValueError("candidate or candidate_json is required")
 
+    existing = find_pending_by_message(conn, source=source, message_id=message_id)
+    if existing is not None:
+        return int(existing["id"])
+
     cursor = conn.execute(
         """
         INSERT INTO pending (
             source, message_id, candidate_json, confidence, reason, source_snippet, status
         )
         VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        ON CONFLICT DO NOTHING
         """,
         (source, message_id, candidate_json, confidence, reason, source_snippet),
     )
     conn.commit()
-    return int(cursor.lastrowid)
+    if cursor.rowcount:
+        return int(cursor.lastrowid)
+    existing = find_pending_by_message(conn, source=source, message_id=message_id)
+    if existing is None:
+        raise sqlite3.IntegrityError("pending candidate insert was ignored")
+    return int(existing["id"])
+
+
+_PENDING_COLUMNS = (
+    "id",
+    "source",
+    "message_id",
+    "candidate_json",
+    "confidence",
+    "reason",
+    "source_snippet",
+    "status",
+    "created_at",
+)
+
+
+def find_pending_by_message(
+    conn: sqlite3.Connection, *, source: str, message_id: str
+) -> dict[str, Any] | None:
+    """Return the pending row for this source message, regardless of status."""
+    if not message_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT id, source, message_id, candidate_json, confidence, reason, source_snippet,
+               status, created_at
+        FROM pending
+        WHERE source = ? AND message_id = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (source, message_id),
+    ).fetchone()
+    return dict(zip(_PENDING_COLUMNS, row, strict=True)) if row else None
 
 
 def get_pending(conn: sqlite3.Connection, pending_id: int) -> dict[str, Any] | None:
