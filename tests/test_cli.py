@@ -1,6 +1,7 @@
 import pytest
 
 from cuecal import __version__, cli, db, registry
+from cuecal.sinks.google import NO_CREDENTIALS_MESSAGE
 
 SUBCOMMANDS = ["init", "auth", "run", "pending", "misses", "missed", "service", "doctor"]
 
@@ -74,9 +75,7 @@ def test_doctor_flags_sink_without_credentials(capsys):
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor"]) == 1
-    assert (
-        "sink google-calendar: google-calendar sink has no credentials; run cuecal auth google"
-    ) in capsys.readouterr().out
+    assert f"sink google-calendar: {NO_CREDENTIALS_MESSAGE}" in capsys.readouterr().out
 
 
 def test_doctor_reports_broken_plugin(monkeypatch, capsys):
@@ -571,20 +570,14 @@ def test_cli_run_without_google_credentials_logs_once_without_request(
         assert cli.main(["run", "--once"]) == 1
 
     errors = [record for record in caplog.records if record.levelname == "ERROR"]
-    assert [record.getMessage() for record in errors] == [
-        "google-calendar sink has no credentials; run cuecal auth google"
-    ]
+    assert [record.getMessage() for record in errors] == [NO_CREDENTIALS_MESSAGE]
     assert errors[0].exc_info is None
     assert requests == []
     conn = db.connect(tmp_path / "state.db")
     assert db.get_cursor(conn, "dummy") == "cursor_next"
     rows = db.list_pending(conn)
     assert [row["message_id"] for row in rows] == ["msg1", "msg2"]
-    assert all(
-        row["reason"]
-        == "sink error: google-calendar sink has no credentials; run cuecal auth google"
-        for row in rows
-    )
+    assert all(row["reason"] == f"sink error: {NO_CREDENTIALS_MESSAGE}" for row in rows)
 
 
 def test_cli_pending_list_and_empty(tmp_path, capsys):

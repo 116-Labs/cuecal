@@ -424,7 +424,7 @@ def test_request_without_token_raises_before_sending(monkeypatch):
     monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: None)
     sink = GoogleCalendarSink()
 
-    with pytest.raises(SinkCredentialsError, match="run cuecal auth google"):
+    with pytest.raises(SinkCredentialsError, match='keyring entry "google"'):
         sink.check_credentials()
     with pytest.raises(SinkCredentialsError, match="google-calendar sink has no credentials"):
         sink.find_by_meeting_id("mtg1")
