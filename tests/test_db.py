@@ -172,6 +172,57 @@ def test_pending_crud_helpers(tmp_path):
     assert db.list_pending(conn, status="pending") == []
 
 
+def test_add_pending_dedupes_on_source_and_message(tmp_path):
+    from cuecal.models import MeetingCandidate
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(title="Sync", confidence=0.6, meeting_id="m1")
+
+    first = db.add_pending(conn, candidate=cand, source="slack", message_id="msg1")
+    assert db.find_pending_by_message(conn, source="slack", message_id="msg1")["id"] == first
+
+    # Same message again: no new row, the first id comes back, whatever its status.
+    assert db.reject_pending(conn, first) is True
+    assert db.add_pending(conn, candidate=cand, source="slack", message_id="msg1") == first
+    assert len(db.list_pending(conn, status=None)) == 1
+
+    # Another source or message is a different row.
+    assert db.add_pending(conn, candidate=cand, source="gmail", message_id="msg1") != first
+    assert db.add_pending(conn, candidate=cand, source="slack", message_id="msg2") != first
+    assert len(db.list_pending(conn, status=None)) == 3
+
+    # Rows without a message id never collide with each other.
+    a = db.add_pending(conn, candidate=cand, source="slack")
+    b = db.add_pending(conn, candidate=cand, source="slack")
+    assert a != b
+    assert db.find_pending_by_message(conn, source="slack", message_id="") is None
+
+    # The index backs the check: a direct duplicate insert is refused.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO pending (source, message_id, candidate_json) "
+            "VALUES ('slack', 'msg1', '{}')"
+        )
+
+
+def test_migration_removes_pending_duplicates(tmp_path, monkeypatch):
+    conn = sqlite3.connect(tmp_path / "state.db")
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:5])
+    assert db.migrate(conn) == 5
+    for mid in ("msg1", "msg1", "msg1", "msg2", "", ""):
+        conn.execute(
+            "INSERT INTO pending (source, message_id, candidate_json) VALUES ('slack', ?, '{}')",
+            (mid,),
+        )
+    conn.commit()
+    monkeypatch.undo()
+
+    assert db.migrate(conn) == len(db.MIGRATIONS)
+    rows = conn.execute("SELECT id, message_id FROM pending ORDER BY id").fetchall()
+    # The oldest row per message survives; rows without a message id are all kept.
+    assert rows == [(1, "msg1"), (4, "msg2"), (5, ""), (6, "")]
+
+
 def test_sink_delivery_helpers(tmp_path):
     conn = db.connect(tmp_path / "state.db")
     assert db.list_sink_deliveries(conn) == []

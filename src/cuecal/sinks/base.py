@@ -9,6 +9,10 @@ from typing import Any, Protocol, runtime_checkable
 from cuecal.models import MeetingCandidate
 
 
+class SinkCredentialsError(RuntimeError):
+    """The sink has no credentials to authenticate with; no request was sent."""
+
+
 @dataclass
 class SinkEvent:
     id: str

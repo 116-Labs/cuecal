@@ -95,6 +95,15 @@ MIGRATIONS: list[str] = [
         UNIQUE (meeting_id, sink)
     );
     """,
+    """
+    DELETE FROM pending
+    WHERE message_id <> ''
+      AND id NOT IN (
+        SELECT MIN(id) FROM pending WHERE message_id <> '' GROUP BY source, message_id
+      );
+    CREATE UNIQUE INDEX pending_source_message
+        ON pending (source, message_id) WHERE message_id <> '';
+    """,
 ]
 
 SINK_DELIVERY_STATUSES = ("pending", "synced", "failed")
@@ -362,6 +371,47 @@ def get_sink_delivery_counts(conn: sqlite3.Connection) -> dict[str, dict[str, in
     return counts
 
 
+_PENDING_COLUMNS = (
+    "id",
+    "source",
+    "message_id",
+    "candidate_json",
+    "confidence",
+    "reason",
+    "source_snippet",
+    "status",
+    "created_at",
+)
+
+
+def _pending_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return dict(zip(_PENDING_COLUMNS, row, strict=True))
+
+
+def find_pending_by_message(
+    conn: sqlite3.Connection, *, source: str, message_id: str
+) -> dict[str, Any] | None:
+    """Return the pending row queued for this message, whatever its status, else None.
+
+    Rows without a message id are never matched: a message id is what makes a queue entry
+    identifiable across runs.
+    """
+    if not message_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT id, source, message_id, candidate_json, confidence, reason, source_snippet,
+               status, created_at
+        FROM pending
+        WHERE source = ? AND message_id = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (source, message_id),
+    ).fetchone()
+    return _pending_row(row) if row else None
+
+
 def add_pending(
     conn: sqlite3.Connection,
     *,
@@ -373,6 +423,11 @@ def add_pending(
     source: str = "",
     message_id: str = "",
 ) -> int:
+    """Queue a candidate for review and return the row id.
+
+    Queueing is idempotent per ``(source, message_id)``: when that message already has a row,
+    whatever its status, the existing id is returned and nothing is inserted.
+    """
     if candidate is not None:
         if candidate_json is None:
             candidate_json = candidate.to_json()
@@ -382,6 +437,10 @@ def add_pending(
             source = candidate.source_ref
     if candidate_json is None:
         raise ValueError("candidate or candidate_json is required")
+
+    existing = find_pending_by_message(conn, source=source, message_id=message_id)
+    if existing is not None:
+        return int(existing["id"])
 
     cursor = conn.execute(
         """
@@ -406,19 +465,7 @@ def get_pending(conn: sqlite3.Connection, pending_id: int) -> dict[str, Any] | N
         """,
         (pending_id,),
     ).fetchone()
-    if not row:
-        return None
-    return {
-        "id": row[0],
-        "source": row[1],
-        "message_id": row[2],
-        "candidate_json": row[3],
-        "confidence": row[4],
-        "reason": row[5],
-        "source_snippet": row[6],
-        "status": row[7],
-        "created_at": row[8],
-    }
+    return _pending_row(row) if row else None
 
 
 def list_pending(
@@ -444,20 +491,7 @@ def list_pending(
             ORDER BY id ASC
             """
         ).fetchall()
-    return [
-        {
-            "id": r[0],
-            "source": r[1],
-            "message_id": r[2],
-            "candidate_json": r[3],
-            "confidence": r[4],
-            "reason": r[5],
-            "source_snippet": r[6],
-            "status": r[7],
-            "created_at": r[8],
-        }
-        for r in rows
-    ]
+    return [_pending_row(r) for r in rows]
 
 
 def update_pending(

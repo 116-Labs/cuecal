@@ -27,7 +27,7 @@ from cuecal.conference import (
 )
 from cuecal.config import ConferenceConfig
 from cuecal.models import MeetingCandidate
-from cuecal.sinks.base import SinkEvent
+from cuecal.sinks.base import SinkCredentialsError, SinkEvent
 
 logger = logging.getLogger("cuecal.sinks.google")
 
@@ -161,6 +161,13 @@ class GoogleCalendarSink:
             return token
         return ""
 
+    def check_credentials(self) -> None:
+        """Raise ``SinkCredentialsError`` when no Google token is available."""
+        if not self._get_token():
+            raise SinkCredentialsError(
+                f"{self.name} sink has no credentials; run cuecal auth google"
+            )
+
     def _request(
         self,
         method: str,
@@ -181,13 +188,12 @@ class GoogleCalendarSink:
             if callable(self._http_client):
                 return self._http_client(method, path, params=params, body=body)
 
-        token = self._get_token()
+        self.check_credentials()
         headers = {
             "Accept": "application/json",
             "User-Agent": f"cuecal/{__version__}",
+            "Authorization": f"Bearer {self._get_token()}",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
         data_bytes = None
         if body is not None:

@@ -14,6 +14,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CUECAL_LOCK_PATH", str(tmp_path / "cuecal.lock"))
     monkeypatch.setattr(registry, "_registry", {kind: {} for kind in registry.KINDS})
     monkeypatch.setattr("cuecal.notify.DesktopNotifier.send", lambda self, notification: None)
+    # No test here may read the real keyring; a test that needs a token patches this again.
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: None)
     # The launchd backend writes only a plist file, so it runs on any host.
     monkeypatch.setattr("cuecal.service._platform", lambda: "darwin")
 
@@ -52,17 +54,37 @@ def test_main_registers_entry_point_plugins_before_non_doctor_command(monkeypatc
     assert cli.main(["init"]) == 0
 
 
-def test_doctor_reports_paths_backend_and_plugins(tmp_path, capsys):
+def test_doctor_reports_paths_backend_and_plugins(tmp_path, monkeypatch, capsys):
     registry.register("sinks", "ics", object())
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "tok" if ref == "google" else None)
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
     assert f"config path: {tmp_path / 'config.toml'}" in out
+    assert "sink google-calendar: ok" in out
     assert f"db path: {tmp_path / 'state.db'}" in out
     assert "keyring backend:" in out
     assert "sinks: google-calendar, ics" in out
     assert "sources: gmail" in out
+
+
+def test_doctor_flags_sink_without_credentials(capsys):
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert (
+        "sink google-calendar: google-calendar sink has no credentials; run cuecal auth google"
+    ) in out
+
+
+def test_doctor_flags_unregistered_sink(monkeypatch, capsys):
+    monkeypatch.setattr(registry, "load_entry_points", lambda: [])
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    assert cli.main(["doctor"]) == 1
+    assert "sink google-calendar: not registered" in capsys.readouterr().out
 
 
 def test_doctor_reports_broken_plugin(monkeypatch, capsys):
@@ -1049,3 +1071,160 @@ def test_cli_approve_fans_out_to_secondary(tmp_path, monkeypatch, capsys):
     conn.close()
 
 
+
+
+def _use_dummy_source(config_path):
+    content = config_path.read_text()
+    config_path.write_text(content.replace("sources = []", 'sources = ["dummy"]'))
+
+
+def _replaying_source(messages, cursor="cursor_next"):
+    """A source that returns the same messages on every fetch, as a stalled cursor would."""
+
+    class DummySource:
+        name = "dummy"
+
+        def fetch_since(self, _cursor):
+            return list(messages), cursor
+
+    return DummySource
+
+
+def test_cli_run_twice_queues_each_message_once(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    notified = []
+    monkeypatch.setattr(
+        "cuecal.notify.DesktopNotifier.send", lambda self, n: notified.append(n)
+    )
+
+    msg = Message(id="msg_low", source="dummy", sender="a", ts=datetime.now(), text="maybe")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else object(),
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda m: MeetingCandidate(confidence=0.5, meeting_id="mtg_low", title="Maybe"),
+    )
+    _use_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 0
+    assert cli.main(["run", "--once"]) == 0
+
+    conn = db.connect(tmp_path / "state.db")
+    rows = db.list_pending(conn, status=None)
+    assert [(r["source"], r["message_id"]) for r in rows] == [("dummy", "msg_low")]
+    assert len(notified) == 1
+
+    # A row the user already acted on still blocks a re-queue.
+    assert db.reject_pending(conn, rows[0]["id"]) is True
+    assert cli.main(["run", "--once"]) == 0
+    assert len(db.list_pending(conn, status=None)) == 1
+    assert len(notified) == 1
+
+
+def test_cli_run_sink_failure_queues_candidate_and_finishes_pass(tmp_path, monkeypatch, capsys):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+
+    messages = [
+        Message(id=f"msg{i}", source="dummy", sender="a", ts=datetime.now(), text="x")
+        for i in (1, 2, 3)
+    ]
+    created = []
+
+    class FlakySink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            if candidate.meeting_id == "mtg2":
+                raise ConnectionError("calendar unreachable")
+            created.append(candidate.meeting_id)
+            return f"evt_{candidate.meeting_id}"
+
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source(messages) if kind == "sources" else FlakySink(),
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda m: MeetingCandidate(confidence=0.9, meeting_id=f"mtg{m.id[-1]}", title=m.id),
+    )
+    _use_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 1
+
+    # The failure neither stopped the pass nor stalled the cursor.
+    assert created == ["mtg1", "mtg3"]
+    conn = db.connect(tmp_path / "state.db")
+    assert db.get_cursor(conn, "dummy") == "cursor_next"
+
+    rows = db.list_pending(conn)
+    assert [(r["message_id"], r["reason"]) for r in rows] == [
+        ("msg2", "sink error: ConnectionError: calendar unreachable")
+    ]
+
+    assert cli.main(["service", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "(error)" in out
+    assert (
+        "1 candidate(s) queued after sink 'google-calendar' failed: "
+        "ConnectionError: calendar unreachable"
+    ) in out
+
+
+def test_cli_run_without_google_credentials_logs_once_and_sends_nothing(
+    tmp_path, monkeypatch, caplog
+):
+    import urllib.request
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+    from cuecal.sinks.google import GoogleCalendarSink
+
+    assert cli.main(["init"]) == 0
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("a request went out without credentials")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
+
+    messages = [
+        Message(id=f"msg{i}", source="dummy", sender="a", ts=datetime.now(), text="x")
+        for i in (1, 2)
+    ]
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source(messages) if kind == "sources" else GoogleCalendarSink,
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda m: MeetingCandidate(confidence=0.9, meeting_id=f"mtg{m.id[-1]}", title=m.id),
+    )
+    _use_dummy_source(tmp_path / "config.toml")
+
+    with caplog.at_level("ERROR", logger="cuecal"):
+        assert cli.main(["run", "--once"]) == 1
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert [r.getMessage() for r in errors] == [
+        "google-calendar sink has no credentials; run cuecal auth google"
+    ]
+    assert errors[0].exc_info is None
+
+    conn = db.connect(tmp_path / "state.db")
+    assert db.get_cursor(conn, "dummy") == "cursor_next"
+    rows = db.list_pending(conn)
+    assert [r["message_id"] for r in rows] == ["msg1", "msg2"]
+    assert all(
+        r["reason"] == "sink error: google-calendar sink has no credentials; run cuecal auth google"
+        for r in rows
+    )
