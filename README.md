@@ -86,7 +86,7 @@ This installs `cuecal` directly onto your `PATH`. You can then run commands dire
 
 ```sh
 cuecal init     # writes the default config and creates the state DB
-cuecal doctor   # reports config, DB, keyring backend and registered plugins
+cuecal doctor   # reports config, sink credentials, DB, keyring backend and registered plugins
 ```
 
 ### 2. Or run via `uv run` (Development)

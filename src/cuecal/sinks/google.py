@@ -27,11 +27,17 @@ from cuecal.conference import (
 )
 from cuecal.config import ConferenceConfig
 from cuecal.models import MeetingCandidate
-from cuecal.sinks.base import SinkEvent
+from cuecal.sinks.base import SinkCredentialsError, SinkEvent
 
 logger = logging.getLogger("cuecal.sinks.google")
 
 GOOGLE_CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3"
+
+# `cuecal auth google` is a stub until #51 lands, so point at the keyring entry the sink reads.
+NO_CREDENTIALS_MESSAGE = (
+    "google-calendar sink has no credentials; store a Google access token as keyring entry "
+    '"google" under service "cuecal" (cuecal auth google arrives with #51)'
+)
 
 
 def parse_calendar_event(data: dict[str, Any]) -> SinkEvent:
@@ -161,6 +167,11 @@ class GoogleCalendarSink:
             return token
         return ""
 
+    def check_credentials(self) -> None:
+        """Raise a clear error when this sink has no Google access token."""
+        if not self._get_token():
+            raise SinkCredentialsError(NO_CREDENTIALS_MESSAGE)
+
     def _request(
         self,
         method: str,
@@ -181,13 +192,12 @@ class GoogleCalendarSink:
             if callable(self._http_client):
                 return self._http_client(method, path, params=params, body=body)
 
-        token = self._get_token()
+        self.check_credentials()
         headers = {
             "Accept": "application/json",
             "User-Agent": f"cuecal/{__version__}",
+            "Authorization": f"Bearer {self._get_token()}",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
         data_bytes = None
         if body is not None:

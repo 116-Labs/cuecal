@@ -412,3 +412,19 @@ def test_raw_urllib_request_dispatch():
         assert req.headers.get("User-agent") == f"cuecal/{__version__}"
         assert event is not None
         assert event.id == "event_raw"
+
+
+def test_request_without_token_raises_before_sending(monkeypatch):
+    from cuecal.sinks.base import SinkCredentialsError
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("request sent without credentials")
+
+    monkeypatch.setattr("urllib.request.urlopen", no_network)
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: None)
+    sink = GoogleCalendarSink()
+
+    with pytest.raises(SinkCredentialsError, match='keyring entry "google"'):
+        sink.check_credentials()
+    with pytest.raises(SinkCredentialsError, match="google-calendar sink has no credentials"):
+        sink.find_by_meeting_id("mtg1")

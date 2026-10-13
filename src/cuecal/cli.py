@@ -11,11 +11,13 @@ import sys
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from . import __version__, db, lock, log, notify, paths, registry, secrets, service
 from .config import Config, ConfigError, load_config, write_default_config
 from .models import MeetingCandidate
 from .sinks import fanout
+from .sinks.base import SinkCredentialsError
 from .sources.calendar import CalendarSource
 
 logger = logging.getLogger("cuecal.cli")
@@ -48,6 +50,42 @@ def _sync_mirrors(conn: sqlite3.Connection, source: CalendarSource, *, dry_run: 
             print(f"dry-run: would {op.describe()}")
         else:
             logger.info("mirror: %s", op.describe())
+
+
+def _queue_pending(
+    conn: sqlite3.Connection,
+    notifiers: list[Any],
+    cand: MeetingCandidate,
+    *,
+    reason: str,
+    snippet: str,
+    source: str,
+    message_id: str,
+) -> None:
+    """Queue and notify once for a message, even if it is replayed on a later pass."""
+    source = source or cand.source_ref or ""
+    existing = db.find_pending_by_message(conn, source=source, message_id=message_id)
+    if existing is not None:
+        logger.info(
+            "candidate %r already queued (id: %d, status: %s); not queued again",
+            cand.title,
+            existing["id"],
+            existing["status"],
+        )
+        return
+    pending_id = db.add_pending(
+        conn,
+        candidate=cand,
+        confidence=cand.confidence,
+        reason=reason,
+        source_snippet=snippet,
+        source=source,
+        message_id=message_id,
+    )
+    logger.info(
+        "queued candidate %r to pending (id: %d, reason: %s)", cand.title, pending_id, reason
+    )
+    notify.notify_pending(notifiers, cand, snippet=snippet, pending_id=pending_id)
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -138,7 +176,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     else:
                         sources.append(cls())
 
+            sink_failures: list[str] = []
             while True:
+                credentials_reported = False
                 if secondaries and not args.dry_run:
                     fanout.retry_failed(conn, secondaries)
 
@@ -200,19 +240,45 @@ def cmd_run(args: argparse.Namespace) -> int:
                             val_reason = "end time must be after start time"
 
                         snippet = msg.text[:200] if hasattr(msg, "text") and msg.text else ""
+                        source_name = msg.source if hasattr(msg, "source") else ""
+                        message_id = msg.id if hasattr(msg, "id") else ""
 
                         if is_valid and cand.confidence >= cfg.auto_create_threshold:
                             if args.dry_run:
                                 logger.info("dry-run: would create event for %r", cand.title)
                             elif sink_plugin:
-                                event_id = fanout.deliver(
-                                    conn,
-                                    cand,
-                                    primary_name=cfg.sink,
-                                    primary=sink_plugin,
-                                    secondaries=secondaries,
-                                )
-                                logger.info("created event %r", event_id)
+                                try:
+                                    event_id = fanout.deliver(
+                                        conn,
+                                        cand,
+                                        primary_name=cfg.sink,
+                                        primary=sink_plugin,
+                                        secondaries=secondaries,
+                                    )
+                                except Exception as exc:  # noqa: BLE001 - isolate each candidate write
+                                    if isinstance(exc, SinkCredentialsError):
+                                        error = str(exc)
+                                        if not credentials_reported:
+                                            logger.error("%s", exc)
+                                            credentials_reported = True
+                                    else:
+                                        error = f"{type(exc).__name__}: {exc}"
+                                        logger.error(
+                                            "sink %r failed for %r: %s", cfg.sink, cand.title, error
+                                        )
+                                        logger.debug("sink failure traceback", exc_info=exc)
+                                    sink_failures.append(error)
+                                    _queue_pending(
+                                        conn,
+                                        notifiers,
+                                        cand,
+                                        reason=f"sink error: {error}",
+                                        snippet=snippet,
+                                        source=source_name,
+                                        message_id=message_id,
+                                    )
+                                else:
+                                    logger.info("created event %r", event_id)
                         else:
                             reason = (
                                 val_reason
@@ -229,23 +295,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     reason,
                                 )
                             else:
-                                pending_id = db.add_pending(
+                                _queue_pending(
                                     conn,
-                                    candidate=cand,
-                                    confidence=cand.confidence,
+                                    notifiers,
+                                    cand,
                                     reason=reason,
-                                    source_snippet=snippet,
-                                    source=msg.source if hasattr(msg, "source") else "",
-                                    message_id=msg.id if hasattr(msg, "id") else "",
-                                )
-                                logger.info(
-                                    "queued candidate %r to pending (id: %d, reason: %s)",
-                                    cand.title,
-                                    pending_id,
-                                    reason,
-                                )
-                                notify.notify_pending(
-                                    notifiers, cand, snippet=snippet, pending_id=pending_id
+                                    snippet=snippet,
+                                    source=source_name,
+                                    message_id=message_id,
                                 )
 
                     if next_cursor and not args.dry_run:
@@ -257,6 +314,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 logger.info("sleeping for %d seconds", cfg.poll_interval_seconds)
                 time.sleep(cfg.poll_interval_seconds)
 
+            if sink_failures:
+                summary = (
+                    f"{len(sink_failures)} candidate(s) queued after sink {cfg.sink!r} failed: "
+                    f"{sink_failures[-1]}"
+                )
+                db.record_run_finish(conn, run_id, status="error", error=summary)
+                conn.close()
+                return 1
             db.record_run_finish(conn, run_id, status="success")
             conn.close()
             return 0
@@ -639,6 +704,27 @@ def cmd_missed(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _doctor_check_sink(name: str) -> bool:
+    """Print one sink credential status line and return whether it is ready."""
+    try:
+        plugin = registry.get("sinks", name)
+    except KeyError:
+        print(f"sink {name}: not registered")
+        return False
+    try:
+        check = getattr(fanout.instantiate(plugin), "check_credentials", None)
+        if check is not None:
+            check()
+    except SinkCredentialsError as exc:
+        print(f"sink {name}: {exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 - doctor reports bad plugin state without crashing
+        print(f"sink {name}: credentials check failed ({exc})")
+        return False
+    print(f"sink {name}: ok")
+    return True
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     ok = True
     cfg_path = paths.config_path()
@@ -669,6 +755,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 except Exception as exc:
                     ok = False
                     print(f"source {source_name}: mapping load failed ({exc})")
+        if not _doctor_check_sink(cfg.sink):
+            ok = False
 
     print(f"db path: {paths.db_path()}")
     try:
