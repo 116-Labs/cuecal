@@ -43,13 +43,13 @@ Nothing is tied to one person's setup: accounts, calendars, sources, models and 
 | Tier 0 decision model (Clef-flash, with Laya as the baseline) replacing the regex gate | Planned ([#21](https://github.com/116-Labs/cuecal/issues/21), [#47](https://github.com/116-Labs/cuecal/issues/47)) |
 | Gmail, Slack and generic MCP (Zoho Mail/Cliq) sources; broadened fetch and the near-miss CLI (`misses`, `missed`) | Done ([#3](https://github.com/116-Labs/cuecal/issues/3), [#4](https://github.com/116-Labs/cuecal/issues/4), [#5](https://github.com/116-Labs/cuecal/issues/5), [#46](https://github.com/116-Labs/cuecal/issues/46)) |
 | `cuecal run` pipeline: source → extract → dedupe → route → sink | Done ([#48](https://github.com/116-Labs/cuecal/issues/48)) |
-| Google Calendar sink | Done ([#50](https://github.com/116-Labs/cuecal/issues/50)) |
+| Google Calendar sink | Done ([#50](https://github.com/116-Labs/cuecal/issues/50)); open bug: a meeting-ID update can move an earlier recurring instance's event ([#65](https://github.com/116-Labs/cuecal/issues/65)) |
 | Google sign-in and calendar picker (`cuecal auth google`) | Not built; the command is a stub ([#51](https://github.com/116-Labs/cuecal/issues/51)) |
 | Pending queue (`pending`, `approve`, `reject`, `edit`) | Done ([#40](https://github.com/116-Labs/cuecal/issues/40)) |
-| Pending notifications (desktop, ntfy) | Done ([#41](https://github.com/116-Labs/cuecal/issues/41)) |
+| Pending notifications (desktop, ntfy) | Done ([#41](https://github.com/116-Labs/cuecal/issues/41)); desktop notifications are macOS only, so on Windows and Linux only ntfy delivers |
 | Dedupe | Partial: meeting-ID and `cuecalMeetingId` marker matching run today; start-time/title and hand-made-event matching are in `dedupe.py` but not called by `cuecal run` ([#39](https://github.com/116-Labs/cuecal/issues/39)) |
 | Secondary sinks: fan-out with per-sink retry | Done ([#42](https://github.com/116-Labs/cuecal/issues/42)) |
-| Google Meet provisioning and provider replacement | Partial: implemented in the Google sink, but `cuecal run` does not call it, so `[conference]` has no effect yet ([#43](https://github.com/116-Labs/cuecal/issues/43)) |
+| Google Meet provisioning and provider replacement | Partial: implemented in the Google sink, but `cuecal run` does not call it, so `[conference]` has no effect yet ([#43](https://github.com/116-Labs/cuecal/issues/43); wiring tracked in [#105](https://github.com/116-Labs/cuecal/issues/105)) |
 | Calendar mirroring (secondary calendars into the target) | Done; final manual check open ([#17](https://github.com/116-Labs/cuecal/issues/17)) |
 | Zoho Calendar sink | Planned ([#44](https://github.com/116-Labs/cuecal/issues/44)) |
 | Background service (macOS launchd, Windows Task Scheduler) | Done ([#11](https://github.com/116-Labs/cuecal/issues/11), [#89](https://github.com/116-Labs/cuecal/pull/89)) |
