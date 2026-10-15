@@ -1,0 +1,40 @@
+{
+  "id": "core-008-gcal-ics-utc-zoom",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Invitation: Security Review @ Wed Oct 28, 2026 10am - 10:45am (PDT)\n\nJoining info is in the attached invite.",
+    "received_at": "2026-10-19T18:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": [
+      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:security-review-002@example.com\r\nDTSTART:20261028T170000Z\r\nDTEND:20261028T174500Z\r\nSUMMARY:Security Review\r\nLOCATION:https://zoom.us/j/83322200066?pwd=U2VjUmV2\r\nDESCRIPTION:Passcode: SecRev\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    ]
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Security Review",
+      "start": "2026-10-28T17:00:00+00:00",
+      "end": "2026-10-28T17:45:00+00:00",
+      "tz": "UTC",
+      "join_url": "https://zoom.us/j/83322200066?pwd=U2VjUmV2",
+      "meeting_id": "83322200066",
+      "passcode": "SecRev",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "ics"
+    }
+  },
+  "metadata": {
+    "description": "Calendar invite whose .ics uses UTC (Z) times; the Zoom link is in LOCATION.",
+    "source_type": "gcal_email",
+    "edge_cases": [
+      "ics_attachment",
+      "utc"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

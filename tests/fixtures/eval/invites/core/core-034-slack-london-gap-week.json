@@ -1,0 +1,39 @@
+{
+  "id": "core-034-slack-london-gap-week",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Booked the partner sync for Wed 28 Oct at 3pm London time: https://zoom.us/j/87700011199",
+    "received_at": "2026-10-23T09:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792746000000700",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Partner sync",
+      "start": "2026-10-28T15:00:00+00:00",
+      "end": null,
+      "tz": "Europe/London",
+      "join_url": "https://zoom.us/j/87700011199",
+      "meeting_id": "87700011199",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.85,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "UK clocks change on Oct 25 and US clocks on Nov 1, so on Oct 28 London is GMT (+00:00) while New York is still EDT: 15:00 London = 11:00 New York, not the usual 10:00.",
+    "source_type": "slack",
+    "edge_cases": [
+      "explicit_city_tz",
+      "dst_gap_week",
+      "day_month_order"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

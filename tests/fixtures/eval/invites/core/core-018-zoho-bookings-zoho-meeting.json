@@ -1,0 +1,37 @@
+{
+  "id": "core-018-zoho-bookings-zoho-meeting",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Appointment confirmed\n\nService: Onboarding Call\nDate & Time: Oct 26, 2026 at 10:00 AM\nTime Zone: America/New_York\n\nJoin Zoho Meeting: https://meeting.zoho.com/meeting/join?key=1029384756\nMeeting ID: 1029384756",
+    "received_at": "2026-10-19T12:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "bookings@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Onboarding Call",
+      "start": "2026-10-26T10:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://meeting.zoho.com/meeting/join?key=1029384756",
+      "meeting_id": "1029384756",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoho Meeting link. A correct system still captures it as the join link; Tier 0's provider list (Zoom/Meet/Teams/Webex) has no Zoho Meeting pattern.",
+    "source_type": "zoho_bookings",
+    "edge_cases": [
+      "unsupported_provider"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

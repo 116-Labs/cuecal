@@ -1,0 +1,38 @@
+{
+  "id": "core-010-gcal-text-city-tz",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Customer Escalation Sync\nThursday Oct 22, 2026 ⋅ 10:00 – 10:30am\nEastern Time - New York\n\nGoogle Meet joining info\nVideo call link: https://meet.google.com/abc-mnop-qrs\n\nInvitation from Google Calendar",
+    "received_at": "2026-10-16T13:45:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Customer Escalation Sync",
+      "start": "2026-10-22T10:00:00-04:00",
+      "end": "2026-10-22T10:30:00-04:00",
+      "tz": "America/New_York",
+      "join_url": "https://meet.google.com/abc-mnop-qrs",
+      "meeting_id": "abc-mnop-qrs",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Google's text layout: weekday-first date, start time without am/pm ('10:00 – 10:30am'), timezone on its own line as 'Eastern Time - New York'.",
+    "source_type": "gcal_email",
+    "edge_cases": [
+      "explicit_tz",
+      "start_without_ampm"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

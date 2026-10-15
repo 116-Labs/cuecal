@@ -1,0 +1,39 @@
+{
+  "id": "core-016-webex-invite",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Webex meeting invitation: Data Platform Sync\n\nWednesday, Oct 28, 2026 11:00 AM | 1 hour | (UTC-07:00) Mountain Time (US & Canada)\n\nJoin meeting\nhttps://example-org.webex.com/meet/jordan.example\n\nMeeting number (access code): 2634 123 4567\nMeeting password: DpSync26",
+    "received_at": "2026-10-20T15:00:00Z",
+    "recipient_tz": "America/Denver",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Data Platform Sync",
+      "start": "2026-10-28T11:00:00-06:00",
+      "end": "2026-10-28T12:00:00-06:00",
+      "tz": "America/Denver",
+      "join_url": "https://example-org.webex.com/meet/jordan.example",
+      "meeting_id": "26341234567",
+      "passcode": "DpSync26",
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Webex layout: date, start, a duration instead of an end time, and '(UTC-07:00) Mountain Time' (standard label; Denver is on MDT, -06:00, on Oct 28).",
+    "source_type": "webex_email",
+    "edge_cases": [
+      "webex",
+      "windows_tz_label",
+      "duration_not_end"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

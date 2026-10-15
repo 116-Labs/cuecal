@@ -1,0 +1,41 @@
+{
+  "id": "core-009-gcal-ics-all-day",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Invitation: Team Offsite @ Fri Oct 30, 2026 (team@example.com)\n\nAll day. Location: Example Hall, Room B.",
+    "received_at": "2026-10-15T15:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": [
+      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:offsite-003@example.com\r\nDTSTART;VALUE=DATE:20261030\r\nDTEND;VALUE=DATE:20261031\r\nSUMMARY:Team Offsite\r\nLOCATION:Example Hall\\, Room B\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    ]
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Team Offsite",
+      "start": "2026-10-30",
+      "end": "2026-10-31",
+      "tz": null,
+      "join_url": null,
+      "meeting_id": null,
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.4,
+      "tier": "ics"
+    }
+  },
+  "metadata": {
+    "description": "All-day .ics event (VALUE=DATE). Not a timed meeting; a correct system should not invent a time and should ask before writing it.",
+    "source_type": "gcal_email",
+    "edge_cases": [
+      "ics_attachment",
+      "all_day",
+      "linkless"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "core-036-zoom-webinar-marketing",
+  "category": "negatives",
+  "label": "not_invite",
+  "input": {
+    "text": "You're invited! Join our free webinar 'Scaling Postgres in 2027'.\nRegister now: https://zoom.us/webinar/register/WN_ExAmPlE123\nThursday, November 12, 2026 · 10:00 AM Pacific Time\n\nUnsubscribe | Manage preferences",
+    "received_at": "2026-10-20T16:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "events@example.org",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "not_invite",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Marketing webinar with a date, time and a zoom.us link, but it's a registration page the user never accepted.",
+    "source_type": "marketing_email",
+    "edge_cases": [
+      "marketing",
+      "registration_link",
+      "explicit_time"
+    ],
+    "expected_route": "drop",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "id": "core-005-zoom-utc",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Topic: Global Release Readiness\nTime: Oct 27, 2026 03:00 PM UTC\n\nJoin Zoom Meeting\nhttps://zoom.us/j/87788800044?pwd=UmVsZWFzZQ\n\nMeeting ID: 877 8880 0044\nPasscode: 515151",
+    "received_at": "2026-10-16T08:00:00Z",
+    "recipient_tz": "Europe/London",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Global Release Readiness",
+      "start": "2026-10-27T15:00:00+00:00",
+      "end": null,
+      "tz": "UTC",
+      "join_url": "https://zoom.us/j/87788800044?pwd=UmVsZWFzZQ",
+      "meeting_id": "87788800044",
+      "passcode": "515151",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoom invite stated in UTC.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "explicit_tz",
+      "utc"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

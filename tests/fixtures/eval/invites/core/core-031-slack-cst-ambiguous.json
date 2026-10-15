@@ -1,0 +1,38 @@
+{
+  "id": "core-031-slack-cst-ambiguous",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Hardware vendor call moved up a day: Wed Oct 21, 9:00 AM CST. https://zoom.us/j/84433322211",
+    "received_at": "2026-10-19T02:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792375200000500",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Hardware vendor call",
+      "start": "2026-10-21T09:00:00",
+      "end": null,
+      "tz": null,
+      "join_url": "https://zoom.us/j/84433322211",
+      "meeting_id": "84433322211",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.4,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "CST can be US Central Standard Time (though Chicago is on CDT in October), China Standard Time or Cuba Standard Time. Keep the wall-clock time, leave tz unknown, ask a human.",
+    "source_type": "slack",
+    "edge_cases": [
+      "ambiguous_tz",
+      "relative_reference"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

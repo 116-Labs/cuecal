@@ -1,0 +1,38 @@
+{
+  "id": "core-013-outlook-teams-invite",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "When: Tuesday, October 20, 2026 9:00 AM-9:30 AM (UTC-05:00) Eastern Time (US & Canada).\nWhere: Microsoft Teams Meeting\n\n________________________________________________________________________________\nMicrosoft Teams Need help?\nJoin the meeting now\nhttps://teams.microsoft.com/l/meetup-join/19%3ameeting_ZmFrZUV4YW1wbGU%40thread.v2/0?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d\nMeeting ID: 234 567 890 123\nPasscode: aB3cD4\n\nSubject: Vendor Security Questionnaire",
+    "received_at": "2026-10-14T19:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Vendor Security Questionnaire",
+      "start": "2026-10-20T09:00:00-04:00",
+      "end": "2026-10-20T09:30:00-04:00",
+      "tz": "America/New_York",
+      "join_url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_ZmFrZUV4YW1wbGU%40thread.v2/0?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d",
+      "meeting_id": "234567890123",
+      "passcode": "aB3cD4",
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Outlook/Teams body. '(UTC-05:00) Eastern Time (US & Canada)' is Outlook's standard-time label even during daylight time; the meeting is at 09:00 New York local time (EDT, -04:00).",
+    "source_type": "outlook_email",
+    "edge_cases": [
+      "teams",
+      "windows_tz_label"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "id": "core-012-gcal-ics-sequence-reschedule",
+  "category": "invites",
+  "label": "reschedule",
+  "input": {
+    "text": "Updated invitation: Security Review @ Thu Oct 29, 2026 11am - 11:45am (PDT)\n\nThis event has been changed.",
+    "received_at": "2026-10-21T16:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": [
+      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:security-review-002@example.com\r\nSEQUENCE:1\r\nDTSTART:20261029T180000Z\r\nDTEND:20261029T184500Z\r\nSUMMARY:Security Review\r\nLOCATION:https://zoom.us/j/83322200066?pwd=U2VjUmV2\r\nDESCRIPTION:Passcode: SecRev\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    ]
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "Security Review",
+      "start": "2026-10-29T18:00:00+00:00",
+      "end": "2026-10-29T18:45:00+00:00",
+      "tz": "UTC",
+      "join_url": "https://zoom.us/j/83322200066?pwd=U2VjUmV2",
+      "meeting_id": "83322200066",
+      "passcode": "SecRev",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "ics"
+    }
+  },
+  "metadata": {
+    "description": "Same UID as core-008 with SEQUENCE:1 and a new time: an unambiguous reschedule signal.",
+    "source_type": "gcal_email",
+    "edge_cases": [
+      "ics_attachment",
+      "reschedule",
+      "sequence_bump"
+    ],
+    "expected_route": "update_existing",
+    "is_synthetic": true
+  }
+}

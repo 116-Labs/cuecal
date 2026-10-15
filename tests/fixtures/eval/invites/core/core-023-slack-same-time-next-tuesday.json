@@ -1,0 +1,40 @@
+{
+  "id": "core-023-slack-same-time-next-tuesday",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "good chat today! same time next Tuesday? same link as always https://us06web.zoom.us/j/81122334455?pwd=V2Vla2x5U3luYzEy",
+    "received_at": "2026-10-13T19:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "priya@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Weekly Platform Sync",
+      "start": "2026-10-20T11:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://us06web.zoom.us/j/81122334455?pwd=V2Vla2x5U3luYzEy",
+      "meeting_id": "81122334455",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.5,
+      "tier": "local"
+    }
+  },
+  "metadata": {
+    "description": "Next instance of a weekly sync on the SAME Zoom ID. Time is relative to the prior meeting (Tue Oct 13 11:00 PT). Expected: pending, never silently dropped.",
+    "source_type": "slack",
+    "edge_cases": [
+      "relative_date",
+      "recurring_series",
+      "known_meeting_id"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true,
+    "origin": "intern assignment Part 3"
+  }
+}

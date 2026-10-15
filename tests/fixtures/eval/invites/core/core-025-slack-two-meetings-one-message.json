@@ -1,0 +1,39 @@
+{
+  "id": "core-025-slack-two-meetings-one-message",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "FYI standup has a new link starting tomorrow: https://us06web.zoom.us/j/86677889900?pwd=U3RhbmR1cE5ldzk5\n\nand here's the invite for Wednesday's design review :point_down:\nTopic: Design Review: Onboarding v2\nTime: Oct 21, 2026 02:00 PM Eastern Time (US and Canada)\nJoin Zoom Meeting\nhttps://us06web.zoom.us/j/83344556677?pwd=RGVzaWduUmV2aWV3\n\nMeeting ID: 833 4455 6677\nPasscode: 777111",
+    "received_at": "2026-10-13T19:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "priya@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Design Review: Onboarding v2",
+      "start": "2026-10-21T14:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://us06web.zoom.us/j/83344556677?pwd=RGVzaWduUmV2aWV3",
+      "meeting_id": "83344556677",
+      "passcode": "777111",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "A standup link change THEN a pasted design-review invite. The invite's link is the SECOND link. Expected: design review with its own link; the standup line is not an invite.",
+    "source_type": "slack",
+    "edge_cases": [
+      "multiple_links",
+      "two_meetings"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true,
+    "origin": "intern assignment Part 3"
+  }
+}

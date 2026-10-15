@@ -1,0 +1,39 @@
+{
+  "id": "core-015-teams-live-chat",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "jumping on teams in 20 for the contract redlines, link: https://teams.live.com/meet/9876543210123",
+    "received_at": "2026-10-21T17:40:00Z",
+    "recipient_tz": "America/Chicago",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792604400000100",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Contract redlines",
+      "start": "2026-10-21T13:00:00-05:00",
+      "end": null,
+      "tz": "America/Chicago",
+      "join_url": "https://teams.live.com/meet/9876543210123",
+      "meeting_id": "9876543210123",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Consumer Teams link; 'in 20' resolves against received_at (17:40Z = 12:40 CDT, so 13:00 CDT).",
+    "source_type": "slack",
+    "edge_cases": [
+      "relative_time",
+      "implied_tz",
+      "teams"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

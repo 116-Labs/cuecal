@@ -1,0 +1,37 @@
+{
+  "id": "core-004-zoom-personal-room",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Topic: Portfolio Review with Dana\nTime: Oct 20, 2026 04:00 PM Pacific Time (US and Canada)\n\nJoin Zoom Meeting\nhttps://zoom.us/my/dana.example\n\nPasscode: 4411",
+    "received_at": "2026-10-13T17:05:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Portfolio Review with Dana",
+      "start": "2026-10-20T16:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/my/dana.example",
+      "meeting_id": "dana.example",
+      "passcode": "4411",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoom personal meeting room: the vanity name is the meeting ID and is reused across meetings.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "personal_room"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

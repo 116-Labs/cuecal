@@ -1,0 +1,37 @@
+{
+  "id": "core-002-zoom-central",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Topic: Vendor Onboarding Kickoff\nTime: Oct 29, 2026 02:30 PM Central Time (US and Canada)\nJoin Zoom Meeting\nhttps://zoom.us/j/84455500022\n\nMeeting ID: 844 5550 0022\nPasscode: kick0ff",
+    "received_at": "2026-10-15T16:20:00Z",
+    "recipient_tz": "America/Chicago",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Vendor Onboarding Kickoff",
+      "start": "2026-10-29T14:30:00-05:00",
+      "end": null,
+      "tz": "America/Chicago",
+      "join_url": "https://zoom.us/j/84455500022",
+      "meeting_id": "84455500022",
+      "passcode": "kick0ff",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoom invite, Central Time, no pwd in URL; passcode only in text.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "explicit_tz"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

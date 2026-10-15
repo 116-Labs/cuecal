@@ -1,0 +1,39 @@
+{
+  "id": "core-026-slack-adhoc-link-no-time",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "api is 500ing in prod, I'm hopping on https://us06web.zoom.us/j/89900112233?pwd=SW5jaWRlbnQ0MDQ now, join if you can",
+    "received_at": "2026-10-13T19:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "priya@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Incident: API 500s in prod",
+      "start": "2026-10-13T19:30:00+00:00",
+      "end": null,
+      "tz": "UTC",
+      "join_url": "https://us06web.zoom.us/j/89900112233?pwd=SW5jaWRlbnQ0MDQ",
+      "meeting_id": "89900112233",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.3,
+      "tier": "local"
+    }
+  },
+  "metadata": {
+    "description": "Ad-hoc incident call: 'now' means the message time. Expected: pending with start = message time.",
+    "source_type": "slack",
+    "edge_cases": [
+      "relative_time",
+      "no_explicit_time"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true,
+    "origin": "intern assignment Part 3"
+  }
+}

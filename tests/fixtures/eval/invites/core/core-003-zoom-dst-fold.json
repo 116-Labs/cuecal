@@ -1,0 +1,38 @@
+{
+  "id": "core-003-zoom-dst-fold",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Topic: Overnight DB Migration Bridge\nTime: Nov 1, 2026 01:30 AM Pacific Time (US and Canada)\nJoin Zoom Meeting\nhttps://zoom.us/j/86677700033?pwd=TWlncmF0aW9u\n\nMeeting ID: 866 7770 0033\nPasscode: 887766",
+    "received_at": "2026-10-27T22:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Overnight DB Migration Bridge",
+      "start": "2026-11-01T01:30:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/j/86677700033?pwd=TWlncmF0aW9u",
+      "meeting_id": "86677700033",
+      "passcode": "887766",
+      "attendees": [],
+      "confidence": 0.4,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "01:30 on Nov 1, 2026 happens twice in Pacific Time (PDT then PST). The offset can't be known; start is left naive and the candidate must go to pending.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "dst_edge",
+      "ambiguous_time"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "id": "core-029-cliq-your-time-my-time",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Does 4pm your time / 1pm mine work for the contract review? https://zoom.us/j/81199988877 pass 2468",
+    "received_at": "2026-10-16T14:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "sam.example@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Contract review",
+      "start": "2026-10-16T16:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://zoom.us/j/81199988877",
+      "meeting_id": "81199988877",
+      "passcode": "2468",
+      "attendees": [],
+      "confidence": 0.6,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Sender is in Pacific, recipient in Eastern: '4pm your time' = 16:00 EDT on the day received. It's a proposal, so pending. Passcode written as 'pass 2468', not 'Passcode:'.",
+    "source_type": "zoho_cliq",
+    "edge_cases": [
+      "cross_tz",
+      "implied_date",
+      "proposal"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

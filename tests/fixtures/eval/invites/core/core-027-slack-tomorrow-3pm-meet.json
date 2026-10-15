@@ -1,0 +1,38 @@
+{
+  "id": "core-027-slack-tomorrow-3pm-meet",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "can we do the pricing deep-dive tomorrow at 3pm? I'll use my meet link https://meet.google.com/hjk-wxyz-abc",
+    "received_at": "2026-10-14T21:15:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792530900000200",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Pricing deep-dive",
+      "start": "2026-10-15T15:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://meet.google.com/hjk-wxyz-abc",
+      "meeting_id": "hjk-wxyz-abc",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.75,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "'tomorrow at 3pm' with no zone: resolved in recipient_tz. Received Wed Oct 14 14:15 PDT, so Thu Oct 15. Phrased as a question, so pending rather than auto-create.",
+    "source_type": "slack",
+    "edge_cases": [
+      "relative_date",
+      "implied_tz"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}
