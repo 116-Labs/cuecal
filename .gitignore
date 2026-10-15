@@ -10,3 +10,4 @@ dist/
 .gemini/
 .claude/skills/gaal-*/
 .agents/skills/gaal-*/
+.mcp.json
