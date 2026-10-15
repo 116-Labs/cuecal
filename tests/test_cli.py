@@ -1200,3 +1200,160 @@ def test_cli_approve_fans_out_to_secondary(tmp_path, monkeypatch, capsys):
     conn.close()
 
 
+def _secondary_sync_setup(tmp_path, monkeypatch, copy):
+    """A Google-like primary with one delivered meeting, plus a zoho-calendar copy of it."""
+    from datetime import UTC, datetime, timedelta
+
+    from cuecal.models import MeetingCandidate
+    from cuecal.sinks import fanout
+    from cuecal.sinks.base import SinkEvent
+
+    assert cli.main(["init"]) == 0
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text().replace(
+            "secondary_sinks = []", 'secondary_sinks = ["zoho-calendar"]'
+        )
+    )
+    start = datetime.now(UTC) + timedelta(days=3)
+    cand = MeetingCandidate(
+        title="Roadmap", start=start, end=start + timedelta(hours=1), meeting_id="m1"
+    )
+
+    class Primary:
+        name = "google-calendar"
+        current = MeetingCandidate.from_dict(cand.to_dict())
+
+        def create(self, c):
+            return SinkEvent(id="g1", title=c.title, start=c.start, end=c.end)
+
+        def current_candidate(self, event_id):
+            return self.current
+
+    primary = Primary()
+    conn = db.connect(tmp_path / "state.db")
+    fanout.deliver(
+        conn,
+        cand,
+        primary_name="google-calendar",
+        primary=primary,
+        secondaries={"zoho-calendar": copy},
+    )
+    conn.close()
+    plugins = {"google-calendar": primary, "zoho-calendar": copy}
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: plugins[name] if kind == "sinks" and name in plugins else None,
+    )
+    return primary
+
+
+class _ZohoCopy:
+    name = "zoho-calendar"
+
+    def __init__(self, calls, fail=None):
+        self.calls = calls
+        self.fail = fail
+
+    def create(self, c):
+        from datetime import UTC, datetime
+
+        from cuecal.sinks.base import SinkEvent
+
+        now = datetime.now(UTC)
+        return SinkEvent(id="z1", title=c.title, start=now, end=now)
+
+    def update(self, event_id, c):
+        self.calls.append(("update", event_id, c.title))
+        if self.fail:
+            raise self.fail
+
+    def delete(self, event_id):
+        self.calls.append(("delete", event_id))
+
+
+def test_cli_run_queues_secondary_permission_error_as_pending(tmp_path, monkeypatch, capsys):
+    from cuecal.sinks.base import SinkPermissionError
+
+    payload = '{"error": {"code": "PERMISSION_DENIED", "message": "event is read-only"}}'
+    calls = []
+    copy = _ZohoCopy(calls, fail=SinkPermissionError("refused", payload=payload))
+    primary = _secondary_sync_setup(tmp_path, monkeypatch, copy)
+    primary.current.title = "Roadmap v2"
+    notified = []
+    monkeypatch.setattr(
+        "cuecal.cli.notify.notify_pending", lambda *a, **kw: notified.append(kw["pending_id"])
+    )
+
+    assert cli.main(["run", "--once"]) == 0
+    assert calls == [("update", "z1", "Roadmap v2")]
+    # A second run retries the update but queues (and notifies) only once.
+    assert cli.main(["run", "--once"]) == 0
+    assert len(calls) == 2
+
+    conn = db.connect(tmp_path / "state.db")
+    (item,) = db.list_pending(conn)
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    conn.close()
+    assert item["source"] == "sink:zoho-calendar"
+    assert item["message_id"] == "z1"
+    assert item["reason"] == f"zoho-calendar refused to update event z1: {payload}"
+    assert notified == [item["id"]]
+    assert row["status"] == "failed"
+
+    capsys.readouterr()
+    assert cli.main(["service", "status"]) == 0
+    assert f"error: permission denied: {payload}" in capsys.readouterr().out
+
+
+def test_cli_run_dry_run_prints_planned_secondary_writes(tmp_path, monkeypatch, capsys):
+    calls = []
+    primary = _secondary_sync_setup(tmp_path, monkeypatch, _ZohoCopy(calls))
+    primary.current.title = "Roadmap v2"
+    capsys.readouterr()
+
+    assert cli.main(["run", "--once", "--dry-run"]) == 0
+    assert "dry-run: would update zoho-calendar event z1 (Roadmap v2)" in capsys.readouterr().out
+    assert calls == []
+
+    primary.current = None
+    assert cli.main(["run", "--once", "--dry-run"]) == 0
+    assert "dry-run: would delete zoho-calendar event z1 (Roadmap)" in capsys.readouterr().out
+    assert calls == []
+
+    assert cli.main(["run", "--once"]) == 0
+    assert calls == [("delete", "z1")]
+
+
+def test_doctor_checks_secondary_sink_tools(tmp_path, monkeypatch, capsys):
+    class Google:
+        def check_credentials(self):
+            pass
+
+    class Zoho:
+        def check_credentials(self):
+            pass
+
+        def validate(self):
+            raise RuntimeError("update tool 'update_event' is not exposed by the server")
+
+    registry.register("sinks", "google-calendar", Google)
+    registry.register("sinks", "zoho-calendar", Zoho)
+    assert cli.main(["init"]) == 0
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text().replace(
+            "secondary_sinks = []", 'secondary_sinks = ["zoho-calendar"]'
+        )
+    )
+    capsys.readouterr()
+
+    assert cli.main(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "sink google-calendar: ok" in out
+    assert (
+        "sink zoho-calendar: tool check failed "
+        "(update tool 'update_event' is not exposed by the server)" in out
+    )
+
+

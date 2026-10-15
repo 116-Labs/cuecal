@@ -280,6 +280,35 @@ def record_event_link(
     conn.commit()
 
 
+def get_event_link(conn: sqlite3.Connection, meeting_id: str, sink_name: str) -> str | None:
+    """Return the sink's event ID for this meeting, if one was recorded."""
+    row = conn.execute(
+        "SELECT sink_event_id FROM event_link WHERE meeting_id = ? AND sink = ?",
+        (meeting_id, sink_name),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def forget_sink_copy(
+    conn: sqlite3.Connection, delivery_id: int, *, meeting_id: str, sink_name: str
+) -> None:
+    """Drop a deleted secondary copy: its delivery row and its event link."""
+    conn.execute("DELETE FROM sink_delivery WHERE id = ?", (delivery_id,))
+    conn.execute(
+        "DELETE FROM event_link WHERE meeting_id = ? AND sink = ?", (meeting_id, sink_name)
+    )
+    conn.commit()
+
+
+def set_sink_delivery_candidate(
+    conn: sqlite3.Connection, delivery_id: int, candidate_json: str
+) -> None:
+    conn.execute(
+        "UPDATE sink_delivery SET candidate_json = ? WHERE id = ?", (candidate_json, delivery_id)
+    )
+    conn.commit()
+
+
 def add_sink_delivery(
     conn: sqlite3.Connection,
     *,

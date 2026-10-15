@@ -1,9 +1,11 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from cuecal import db
 from cuecal.models import MeetingCandidate
 from cuecal.sinks import fanout
-from cuecal.sinks.base import SinkEvent
+from cuecal.sinks.base import SinkEvent, SinkPermissionError
 
 
 class RecordingSink:
@@ -238,6 +240,217 @@ def test_create_on_sink_supports_legacy_create_event():
     assert fanout.create_on_sink(Legacy(), _cand()) == "legacy-1"
     with pytest.raises(TypeError, match="no create method"):
         fanout.create_on_sink(object(), _cand())
+
+
+FUTURE = datetime(2030, 1, 7, 15, 0, tzinfo=UTC)
+NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+class Primary:
+    """Primary sink whose events the test edits; current_candidate mirrors the Google sink."""
+
+    name = "google-calendar"
+
+    def __init__(self):
+        self.events = {}
+        self.read_error = None
+
+    def create(self, c):
+        self.events["g1"] = MeetingCandidate.from_dict(c.to_dict())
+        return SinkEvent(id="g1", title=c.title, start=c.start, end=c.end)
+
+    def current_candidate(self, event_id):
+        if self.read_error:
+            raise self.read_error
+        ev = self.events.get(event_id)
+        return None if ev is None else MeetingCandidate.from_dict(ev.to_dict())
+
+
+class Copy(RecordingSink):
+    def __init__(self, calls, *, fail_update=None, fail_delete=None):
+        super().__init__("zoho-calendar", calls)
+        self.fail_update = fail_update
+        self.fail_delete = fail_delete
+
+    def update(self, event_id, c):
+        self.calls.append((self.name, "update", event_id, c.title, c.start))
+        if self.fail_update:
+            raise self.fail_update
+
+    def delete(self, event_id):
+        self.calls.append((self.name, "delete", event_id))
+        if self.fail_delete:
+            raise self.fail_delete
+
+
+def _timed(**kw):
+    base = {
+        "title": "Sync",
+        "start": FUTURE,
+        "end": FUTURE + timedelta(hours=1),
+        "join_url": "https://meet.google.com/abc-defg-hij",
+        "meeting_id": "mtg1",
+        "confidence": 0.9,
+    }
+    base.update(kw)
+    return MeetingCandidate(**base)
+
+
+def _delivered(conn, primary, copy, cand=None):
+    fanout.deliver(
+        conn,
+        cand or _timed(),
+        primary_name="google-calendar",
+        primary=primary,
+        secondaries={"zoho-calendar": copy},
+    )
+
+
+def _sync(conn, primary, copy, **kw):
+    return fanout.sync_secondaries(
+        conn,
+        primary_name="google-calendar",
+        primary=primary,
+        secondaries={"zoho-calendar": copy},
+        now=NOW,
+        **kw,
+    )
+
+
+def test_sync_noop_when_primary_unchanged(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    result = _sync(conn, primary, Copy(calls))
+    assert result.ops == []
+    assert calls == [("zoho-calendar", "create", "mtg1")]
+
+
+def test_sync_propagates_title_time_and_join_url(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    moved = FUTURE + timedelta(hours=3)
+    primary.events["g1"].title = "Sync (moved)"
+    primary.events["g1"].start = moved
+    primary.events["g1"].end = moved + timedelta(hours=1)
+
+    result = _sync(conn, primary, Copy(calls))
+    assert [op.describe() for op in result.ops] == [
+        "update zoho-calendar event zoho-calendar-evt (Sync (moved))"
+    ]
+    assert calls[-1] == ("zoho-calendar", "update", "zoho-calendar-evt", "Sync (moved)", moved)
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    assert row["status"] == "synced"
+    assert MeetingCandidate.from_json(row["candidate_json"]).start == moved
+    # The stored state now matches: a second sync writes nothing (idempotent).
+    assert _sync(conn, primary, Copy(calls)).ops == []
+
+    primary.events["g1"].join_url = "https://meet.google.com/xyz-abcd-efg"
+    assert [op.action for op in _sync(conn, primary, Copy(calls)).ops] == ["update"]
+
+
+def test_sync_deletes_copy_when_primary_deleted(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    del primary.events["g1"]
+
+    result = _sync(conn, primary, Copy(calls))
+    assert [op.action for op in result.ops] == ["delete"]
+    assert calls[-1] == ("zoho-calendar", "delete", "zoho-calendar-evt")
+    assert db.list_sink_deliveries(conn, sink="zoho-calendar") == []
+    assert not db.is_duplicate(conn, "mtg1", "zoho-calendar")
+    assert _sync(conn, primary, Copy(calls)).ops == []
+
+
+def test_sync_never_deletes_when_primary_read_fails(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    primary.read_error = ConnectionError("google down")
+    assert _sync(conn, primary, Copy(calls)).ops == []
+    assert ("zoho-calendar", "delete", "zoho-calendar-evt") not in calls
+    assert db.is_duplicate(conn, "mtg1", "zoho-calendar")
+
+
+def test_sync_dry_run_plans_without_writing(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    primary.events["g1"].title = "Renamed"
+    result = _sync(conn, primary, Copy(calls), dry_run=True)
+    assert [op.action for op in result.ops] == ["update"]
+    assert calls == [("zoho-calendar", "create", "mtg1")]
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    assert MeetingCandidate.from_json(row["candidate_json"]).title == "Sync"
+
+    del primary.events["g1"]
+    assert [op.action for op in _sync(conn, primary, Copy(calls), dry_run=True).ops] == ["delete"]
+    assert db.is_duplicate(conn, "mtg1", "zoho-calendar")
+
+
+def test_sync_permission_error_is_recorded_and_reported(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    primary.events["g1"].title = "Renamed"
+    payload = '{"error": {"code": "PERMISSION_DENIED", "message": "read only"}}'
+    copy = Copy(calls, fail_update=SinkPermissionError("refused", payload=payload))
+
+    result = _sync(conn, primary, copy)
+    (failure,) = result.permission_failures
+    assert failure.sink == "zoho-calendar"
+    assert failure.sink_event_id == "zoho-calendar-evt"
+    assert failure.payload == payload
+    assert failure.candidate.title == "Renamed"
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    assert row["status"] == "failed"
+    assert row["error_message"] == f"permission denied: {payload}"
+
+
+def test_sync_retries_failed_update_and_retry_failed_leaves_it(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    primary.events["g1"].title = "Renamed"
+    _sync(conn, primary, Copy(calls, fail_update=TimeoutError("slow")))
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    assert row["status"] == "failed"
+    assert row["error_message"] == "update: TimeoutError: slow"
+
+    # retry_failed must not create a second copy of an event that already exists.
+    assert fanout.retry_failed(conn, {"zoho-calendar": Copy(calls)}) == {"synced": 0, "failed": 0}
+    assert calls.count(("zoho-calendar", "create", "mtg1")) == 1
+
+    # Nothing changed since, but the failed update is tried again and clears the error.
+    assert [op.action for op in _sync(conn, primary, Copy(calls)).ops] == ["update"]
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    assert row["status"] == "synced"
+    assert row["error_message"] is None
+
+
+def test_sync_failed_delete_is_retried(conn):
+    calls, primary = [], Primary()
+    _delivered(conn, primary, Copy(calls))
+    del primary.events["g1"]
+    _sync(conn, primary, Copy(calls, fail_delete=RuntimeError("500")))
+    (row,) = db.list_sink_deliveries(conn, sink="zoho-calendar")
+    assert row["status"] == "failed"
+    assert row["error_message"] == "delete: 500"
+
+    _sync(conn, primary, Copy(calls))
+    assert db.list_sink_deliveries(conn, sink="zoho-calendar") == []
+
+
+def test_sync_skips_past_meetings_and_unconfigured_sinks(conn):
+    calls, primary = [], Primary()
+    past = NOW - timedelta(days=2)
+    _delivered(conn, primary, Copy(calls), _timed(start=past, end=past + timedelta(hours=1)))
+    del primary.events["g1"]
+    assert _sync(conn, primary, Copy(calls)).ops == []
+    assert fanout.sync_secondaries(
+        conn, primary_name="google-calendar", primary=primary, secondaries={}, now=NOW
+    ).ops == []
+
+
+def test_sync_needs_a_readable_primary(conn):
+    calls = []
+    _delivered(conn, RecordingSink("google-calendar", calls), Copy(calls))
+    assert _sync(conn, RecordingSink("google-calendar", calls), Copy(calls)).ops == []
 
 
 def test_delivery_without_meeting_id_is_tracked(conn):

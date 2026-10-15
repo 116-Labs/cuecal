@@ -428,3 +428,63 @@ def test_request_without_token_raises_before_sending(monkeypatch):
         sink.check_credentials()
     with pytest.raises(SinkCredentialsError, match="google-calendar sink has no credentials"):
         sink.find_by_meeting_id("mtg1")
+
+
+def _http_error(code: int):
+    import urllib.error
+
+    return urllib.error.HTTPError("https://x", code, "err", {}, None)
+
+
+def test_current_candidate_reads_event_fields():
+    event = {
+        "id": "ev1",
+        "summary": "Planning",
+        "start": {"dateTime": "2026-10-20T15:00:00+00:00", "timeZone": "Asia/Kolkata"},
+        "end": {"dateTime": "2026-10-20T16:00:00+00:00"},
+        "location": "Room 4",
+        "hangoutLink": "https://meet.google.com/abc-defg-hij",
+        "extendedProperties": {"private": {"cuecalMeetingId": "abc-defg-hij"}},
+    }
+    client = MockHttpClient({"GET /calendars/primary/events/ev1": event})
+    c = GoogleCalendarSink(token_provider="t", http_client=client).current_candidate("ev1")
+    assert c.title == "Planning"
+    assert c.start == datetime(2026, 10, 20, 15, 0, tzinfo=UTC)
+    assert c.end == datetime(2026, 10, 20, 16, 0, tzinfo=UTC)
+    assert c.tz == "Asia/Kolkata"
+    # The conference link wins over a physical location.
+    assert c.join_url == "https://meet.google.com/abc-defg-hij"
+    assert c.meeting_id == "abc-defg-hij"
+
+
+def test_current_candidate_uses_url_location_without_conference_data():
+    event = {
+        "id": "ev1",
+        "summary": "Zoom call",
+        "start": {"dateTime": "2026-10-20T15:00:00Z"},
+        "end": {"dateTime": "2026-10-20T16:00:00Z"},
+        "location": "https://zoom.us/j/123",
+    }
+    client = MockHttpClient({"GET /calendars/primary/events/ev1": event})
+    sink = GoogleCalendarSink(token_provider="t", http_client=client)
+    assert sink.current_candidate("ev1").join_url == "https://zoom.us/j/123"
+
+
+def test_current_candidate_none_when_cancelled_or_gone():
+    cancelled = {"id": "ev1", "status": "cancelled"}
+    client = MockHttpClient(
+        {
+            "GET /calendars/primary/events/ev1": cancelled,
+            "GET /calendars/primary/events/ev2": _http_error(404),
+        }
+    )
+    sink = GoogleCalendarSink(token_provider="t", http_client=client)
+    assert sink.current_candidate("ev1") is None
+    assert sink.current_candidate("ev2") is None
+
+
+def test_current_candidate_raises_on_other_errors():
+    client = MockHttpClient({"GET /calendars/primary/events/ev1": _http_error(500)})
+    sink = GoogleCalendarSink(token_provider="t", http_client=client)
+    with pytest.raises(Exception, match="err"):
+        sink.current_candidate("ev1")

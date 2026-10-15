@@ -88,6 +88,40 @@ def _queue_pending(
     notify.notify_pending(notifiers, cand, snippet=snippet, pending_id=pending_id)
 
 
+def _sync_secondaries(
+    conn: sqlite3.Connection,
+    notifiers: list[Any],
+    cfg: Config,
+    primary: Any,
+    secondaries: dict[str, object | None],
+    *,
+    dry_run: bool,
+) -> None:
+    """Propagate primary-event edits and deletions to secondary copies (one-way)."""
+    result = fanout.sync_secondaries(
+        conn, primary_name=cfg.sink, primary=primary, secondaries=secondaries, dry_run=dry_run
+    )
+    for op in result.ops:
+        if dry_run:
+            print(f"dry-run: would {op.describe()}")
+        else:
+            logger.info("secondary sync: %s", op.describe())
+    for failure in result.permission_failures:
+        # The copy is one the user cannot edit there: a human has to decide what to do with it.
+        _queue_pending(
+            conn,
+            notifiers,
+            failure.candidate,
+            reason=(
+                f"{failure.sink} refused to update event {failure.sink_event_id}: "
+                f"{failure.payload}"
+            ),
+            snippet=failure.payload[:200],
+            source=f"sink:{failure.sink}",
+            message_id=failure.sink_event_id,
+        )
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     path = paths.config_path()
     created = write_default_config(path, force=args.force)
@@ -307,6 +341,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
                     if next_cursor and not args.dry_run:
                         db.set_cursor(conn, source.name, next_cursor)
+
+                if secondaries and sink_plugin is not None:
+                    _sync_secondaries(
+                        conn, notifiers, cfg, sink_plugin, secondaries, dry_run=args.dry_run
+                    )
 
                 if args.once:
                     break
@@ -712,7 +751,8 @@ def _doctor_check_sink(name: str) -> bool:
         print(f"sink {name}: not registered")
         return False
     try:
-        check = getattr(fanout.instantiate(plugin), "check_credentials", None)
+        sink = fanout.instantiate(plugin)
+        check = getattr(sink, "check_credentials", None)
         if check is not None:
             check()
     except SinkCredentialsError as exc:
@@ -721,6 +761,14 @@ def _doctor_check_sink(name: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - doctor reports bad plugin state without crashing
         print(f"sink {name}: credentials check failed ({exc})")
         return False
+    # MCP-backed sinks confirm the server exposes their mapped write tools.
+    validate = getattr(sink, "validate", None)
+    if validate is not None:
+        try:
+            validate()
+        except Exception as exc:  # noqa: BLE001 - doctor reports, not crashes
+            print(f"sink {name}: tool check failed ({exc})")
+            return False
     print(f"sink {name}: ok")
     return True
 
@@ -755,8 +803,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 except Exception as exc:
                     ok = False
                     print(f"source {source_name}: mapping load failed ({exc})")
-        if not _doctor_check_sink(cfg.sink):
-            ok = False
+        for sink_name in (cfg.sink, *cfg.secondary_sinks):
+            if not _doctor_check_sink(sink_name):
+                ok = False
 
     print(f"db path: {paths.db_path()}")
     try:

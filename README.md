@@ -51,7 +51,7 @@ Nothing is tied to one person's setup: accounts, calendars, sources, models and 
 | Secondary sinks: fan-out with per-sink retry | Done ([#42](https://github.com/116-Labs/cuecal/issues/42)) |
 | Google Meet provisioning and provider replacement | Partial: implemented in the Google sink, but `cuecal run` does not call it, so `[conference]` has no effect yet ([#43](https://github.com/116-Labs/cuecal/issues/43)) |
 | Calendar mirroring (secondary calendars into the target) | Done; final manual check open ([#17](https://github.com/116-Labs/cuecal/issues/17)) |
-| Zoho Calendar sink | Planned ([#44](https://github.com/116-Labs/cuecal/issues/44)) |
+| Zoho Calendar sink (MCP write adapter, one-way sync) | Built; tool names unverified against a live Zoho MCP server ([#44](https://github.com/116-Labs/cuecal/issues/44)) |
 | Background service (macOS launchd, Windows Task Scheduler) | Done ([#11](https://github.com/116-Labs/cuecal/issues/11), [#89](https://github.com/116-Labs/cuecal/pull/89)) |
 | Eval fixture layout | Done ([#52](https://github.com/116-Labs/cuecal/pull/52)); fixture corpus and `cuecal eval` runner open ([#36](https://github.com/116-Labs/cuecal/issues/36), [#37](https://github.com/116-Labs/cuecal/issues/37)) |
 | Extractor Tiers 2–3 (local and paid LLM) | Not started ([#8](https://github.com/116-Labs/cuecal/issues/8)) |
@@ -130,6 +130,12 @@ The config holds only keyring entry *names* under `[secrets]`. CueCal refuses to
 Besides `[secrets]`, the loader also accepts the `[llm]`, `[thresholds]`, `[gmail]`, `[limits]`, `[notify]`, `[conference]` and `[mirror]` tables and rejects unknown keys; `cuecal init` writes a commented starting config.
 
 `sink` names the primary sink. `secondary_sinks` lists extra sinks that receive each event only after the primary write succeeds. A failed secondary write never undoes the primary event; it is recorded per sink in the state DB, shown with its error under `cuecal service status`, and retried automatically on the next run while the sink stays listed in `secondary_sinks`. Failures for a sink removed from that list are no longer retried and are marked as such in the status output.
+
+After the first write, each secondary copy follows the primary event one-way. Every run re-reads the primary event of each upcoming meeting. A changed title, start/end or join URL is patched into the copy, and a deleted or cancelled primary event deletes it. A failed read of the primary changes nothing. If the secondary refuses an update as a permission error, the meeting goes to the pending queue with the raw upstream error as the reason. `--dry-run` prints the planned updates and deletes.
+
+#### Zoho Calendar
+
+Add `"zoho-calendar"` to `secondary_sinks` and store a Zoho MCP access token as keyring entry `zoho` (service `cuecal`). The sink writes through the tools named in the shipped mapping `zoho-calendar.toml`, in its `[write]` table. To change tool or field names, copy that file to `mappings/` next to your config. `cuecal doctor` checks that the server exposes the create/update/delete tools and that their input schemas accept the title, time, location and description fields. Copies carry the title, time, join URL and a short description only; attendees are never sent. On the first write, an existing Zoho event that starts within 15 minutes of the meeting and has a similar title is patched instead of creating a second one.
 
 ## Plugins
 
