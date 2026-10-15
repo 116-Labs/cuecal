@@ -248,6 +248,10 @@ class MCPSource:
         asyncio.run(self._validate_async())
 
 
-def load_source(name: str) -> MCPSource:
+def load_source(
+    name: str, *, fetch_limit: int = 50, latency_budget_seconds: float = 30.0
+) -> MCPSource:
     mapping = load_mapping(name)
-    return MCPSource(name, mapping)
+    return MCPSource(
+        name, mapping, fetch_limit=fetch_limit, latency_budget_seconds=latency_budget_seconds
+    )

@@ -6,14 +6,14 @@ auth_header = "Authorization"
 auth_prefix = "Bearer "
 
 list_tool = "list_emails"
+# Top-level keys must come before the first [table]; TOML puts later keys inside that table.
+items_path = "data.emails"
+cursor_path = "data.next_cursor"
 
 [list_args]
 query = ""
 cursor = "{cursor}"
 limit = 50
-
-items_path = "data.emails"
-cursor_path = "data.next_cursor"
 
 [field_mapping]
 id = "message_id"
