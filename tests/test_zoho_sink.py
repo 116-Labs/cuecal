@@ -276,3 +276,42 @@ def test_check_credentials_needs_zoho_token(monkeypatch):
         ZohoCalendarSink().check_credentials()
     monkeypatch.setattr("cuecal.sinks.mcp.secrets.get_secret", lambda ref: "tok")
     ZohoCalendarSink().check_credentials()
+
+
+# --- MCPWriter result handling ---------------------------------------------------------------
+
+
+def _writer() -> MCPWriter:
+    return MCPWriter(load_mapping("zoho-calendar"))
+
+
+def test_structured_content_is_used_when_text_content_is_empty(monkeypatch):
+    result = SimpleNamespace(
+        content=[], structured_content={"data": {"event_id": "z1"}}, is_error=False
+    )
+
+    class _Session:
+        async def call_tool(self, tool, arguments):
+            return result
+
+    class _Open:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("cuecal.sources.mcp.open_session", lambda mapping: _Open())
+    assert _writer().call("delete", {"event_id": "z1"}) == {"data": {"event_id": "z1"}}
+
+
+def test_structured_error_code_overrides_403_mentioned_in_text():
+    raw = '{"error": {"code": "NOT_FOUND", "message": "event 403 not found"}}'
+    err = _writer()._tool_error("update_event", raw, json.loads(raw))
+    assert err.code == "NOT_FOUND"
+    assert not err.permission
+
+
+def test_permission_falls_back_to_raw_text_without_a_structured_code():
+    err = _writer()._tool_error("update_event", "HTTP 403 Forbidden", None)
+    assert err.permission

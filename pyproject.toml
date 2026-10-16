@@ -10,7 +10,7 @@ dependencies = [
     "tzdata>=2024.1",
     "keyring>=25",
     "platformdirs>=4",
-    "mcp>=1.0.0",
+    "mcp>=2.0.0",
     "PyYAML>=6.0",
 ]
 

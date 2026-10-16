@@ -483,9 +483,13 @@ class MCPWriter:
             code = None if code_val is None else str(code_val)
             message = None if msg_val is None else str(msg_val)
         codes = [c.lower() for c in self.write.permission_error_codes]
-        permission = (code is not None and code.lower() in codes) or any(
-            re.search(rf"\b{re.escape(c)}\b", raw, re.IGNORECASE) for c in codes
-        )
+        # A structured code is authoritative; raw text can mention "403" in an ID or a quote.
+        if code is not None:
+            permission = code.lower() in codes
+        else:
+            permission = any(
+                re.search(rf"\b{re.escape(c)}\b", raw, re.IGNORECASE) for c in codes
+            )
         return MCPToolError(tool, raw, code=code, message=message, permission=permission)
 
     async def _call(self, op: str, values: dict[str, Any]) -> Any:
@@ -494,7 +498,8 @@ class MCPWriter:
         async with open_session(self.mapping) as session:
             result = await session.call_tool(tool, arguments=args)
         raw = "\n".join(t for c in result.content or [] if (t := getattr(c, "text", None)))
-        data = _json_in(raw) if raw else None
+        # Text wins when present: servers wrap str returns as structured {"result": "<json>"}.
+        data = _json_in(raw) if raw else getattr(result, "structured_content", None)
         if _is_error(result):
             raise self._tool_error(tool, raw, data)
         if raw and data is None:
