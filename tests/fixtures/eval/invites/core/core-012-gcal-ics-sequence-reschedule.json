@@ -9,7 +9,7 @@
     "sender": "organizer@example.com",
     "permalink": null,
     "attachments": [
-      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:security-review-002@example.com\r\nSEQUENCE:1\r\nDTSTART:20261029T180000Z\r\nDTEND:20261029T184500Z\r\nSUMMARY:Security Review\r\nLOCATION:https://zoom.us/j/83322200066?pwd=U2VjUmV2\r\nDESCRIPTION:Passcode: SecRev\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:security-review-002@example.com\r\nDTSTAMP:20261021T155900Z\r\nORGANIZER;CN=Organizer:mailto:organizer@example.com\r\nSEQUENCE:1\r\nDTSTART:20261029T180000Z\r\nDTEND:20261029T184500Z\r\nSUMMARY:Security Review\r\nLOCATION:https://zoom.us/j/83322200066?pwd=U2VjUmV2\r\nDESCRIPTION:Passcode: SecRev\r\nATTENDEE;CN=Team:mailto:team@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
     ]
   },
   "expected": {
@@ -22,7 +22,9 @@
       "join_url": "https://zoom.us/j/83322200066?pwd=U2VjUmV2",
       "meeting_id": "83322200066",
       "passcode": "SecRev",
-      "attendees": [],
+      "attendees": [
+        "team@example.com"
+      ],
       "confidence": 0.95,
       "tier": "ics"
     }

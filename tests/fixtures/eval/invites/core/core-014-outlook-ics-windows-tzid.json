@@ -9,7 +9,7 @@
     "sender": "organizer@example.com",
     "permalink": null,
     "attachments": [
-      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Pacific Standard Time\r\nBEGIN:STANDARD\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:-0700\r\nTZOFFSETTO:-0800\r\nRRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=1SU;BYMONTH=11\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:-0800\r\nTZOFFSETTO:-0700\r\nRRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=2SU;BYMONTH=3\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:qbr-014@example.com\r\nDTSTART;TZID=Pacific Standard Time:20261026T150000\r\nDTEND;TZID=Pacific Standard Time:20261026T160000\r\nSUMMARY:Quarterly Business Review\r\nLOCATION:Microsoft Teams Meeting\r\nDESCRIPTION:Join the meeting now https://teams.microsoft.com/l/meetup-join/19%3ameeting_UWJyRXhhbXBsZTI2%40thread.v2/0?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d Meeting ID: 345 678 901 234 Passcode: Qbr26x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Pacific Standard Time\r\nBEGIN:STANDARD\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:-0700\r\nTZOFFSETTO:-0800\r\nRRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=1SU;BYMONTH=11\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:-0800\r\nTZOFFSETTO:-0700\r\nRRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=2SU;BYMONTH=3\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:qbr-014@example.com\r\nDTSTAMP:20261015T225900Z\r\nORGANIZER;CN=Organizer:mailto:organizer@example.com\r\nDTSTART;TZID=Pacific Standard Time:20261026T150000\r\nDTEND;TZID=Pacific Standard Time:20261026T160000\r\nSUMMARY:Quarterly Business Review\r\nLOCATION:Microsoft Teams Meeting\r\nDESCRIPTION:Join the meeting now https://teams.microsoft.com/l/meetup-join/19%3ameeting_UWJyRXhhbXBsZTI2%40thread.v2/0?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d Meeting ID: 345 678 901 234 Passcode: Qbr26x\r\nATTENDEE;CN=Team:mailto:team@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
     ]
   },
   "expected": {
@@ -22,7 +22,9 @@
       "join_url": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_UWJyRXhhbXBsZTI2%40thread.v2/0?context=%7b%22Tid%22%3a%2200000000-0000-0000-0000-000000000000%22%7d",
       "meeting_id": "345678901234",
       "passcode": "Qbr26x",
-      "attendees": [],
+      "attendees": [
+        "team@example.com"
+      ],
       "confidence": 0.95,
       "tier": "ics"
     }

@@ -9,7 +9,7 @@
     "sender": "organizer@example.com",
     "permalink": null,
     "attachments": [
-      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:roadmap-review-001@example.com\r\nSEQUENCE:1\r\nSTATUS:CANCELLED\r\nDTSTART;TZID=America/Los_Angeles:20261021T130000\r\nDTEND;TZID=America/Los_Angeles:20261021T140000\r\nSUMMARY:Roadmap Review\r\nDESCRIPTION:Join with Google Meet: https://meet.google.com/kfp-qrst-uvw\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+      "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Example Corp//Calendar//EN\r\nMETHOD:CANCEL\r\nBEGIN:VEVENT\r\nUID:roadmap-review-001@example.com\r\nDTSTAMP:20261019T210900Z\r\nORGANIZER;CN=Organizer:mailto:organizer@example.com\r\nSEQUENCE:1\r\nSTATUS:CANCELLED\r\nDTSTART;TZID=America/Los_Angeles:20261021T130000\r\nDTEND;TZID=America/Los_Angeles:20261021T140000\r\nSUMMARY:Roadmap Review\r\nDESCRIPTION:Join with Google Meet: https://meet.google.com/kfp-qrst-uvw\r\nATTENDEE;CN=Team:mailto:team@example.com\r\nATTENDEE;CN=Lena Example:mailto:lena@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
     ]
   },
   "expected": {
@@ -22,7 +22,10 @@
       "join_url": "https://meet.google.com/kfp-qrst-uvw",
       "meeting_id": "kfp-qrst-uvw",
       "passcode": null,
-      "attendees": [],
+      "attendees": [
+        "team@example.com",
+        "lena@example.com"
+      ],
       "confidence": 0.95,
       "tier": "ics"
     }
