@@ -84,12 +84,17 @@ def path_with(bin_dir: Path) -> str:
 def sed_only_path(tmp_path: Path) -> str:
     """A PATH with the sed fallback's tools but no python or jq."""
     if IS_WINDOWS:
-        # Git Bash's tools need msys-2.0.dll beside them, so use its dirs as-is.
-        root = _git_bash_root()
-        path = os.pathsep.join([str(root / "usr" / "bin"), str(Path(shutil.which("git")).parent)])
-        for name in ("python3", "python", "py", "jq"):
-            if shutil.which(name, path=path):
-                pytest.skip(f"{name} ships beside Git Bash, so it cannot be hidden")
+        # Symlinks need privilege and Git Bash's tools need msys-2.0.dll beside them,
+        # so keep the real PATH and drop only the dirs holding python or jq.
+        hidden = ("python3", "python", "py", "jq")
+        dirs = [str(_git_bash_root() / "usr" / "bin")] + [
+            d
+            for d in os.environ["PATH"].split(os.pathsep)
+            if d and not any(shutil.which(name, path=d) for name in hidden)
+        ]
+        path = os.pathsep.join(dirs)
+        if shutil.which("git", path=path) is None:
+            pytest.skip("git shares a directory with python or jq, so they cannot be hidden")
         return path
     clean_bin = tmp_path / "clean_bin"
     clean_bin.mkdir()
