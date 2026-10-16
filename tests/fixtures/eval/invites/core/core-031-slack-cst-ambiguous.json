@@ -1,7 +1,7 @@
 {
   "id": "core-031-slack-cst-ambiguous",
   "category": "chat",
-  "label": "new_invite",
+  "label": "reschedule",
   "input": {
     "text": "Hardware vendor call moved up a day: Wed Oct 21, 9:00 AM CST. https://zoom.us/j/84433322211",
     "received_at": "2026-10-19T02:00:00Z",
@@ -11,7 +11,7 @@
     "attachments": []
   },
   "expected": {
-    "label": "new_invite",
+    "label": "reschedule",
     "candidate": {
       "title": "Hardware vendor call",
       "start": "2026-10-21T09:00:00",

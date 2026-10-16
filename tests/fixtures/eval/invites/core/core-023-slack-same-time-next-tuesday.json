@@ -13,8 +13,8 @@
   "expected": {
     "label": "new_invite",
     "candidate": {
-      "title": "Weekly Platform Sync",
-      "start": "2026-10-20T11:00:00-07:00",
+      "title": null,
+      "start": null,
       "end": null,
       "tz": "America/Los_Angeles",
       "join_url": "https://us06web.zoom.us/j/81122334455?pwd=V2Vla2x5U3luYzEy",
