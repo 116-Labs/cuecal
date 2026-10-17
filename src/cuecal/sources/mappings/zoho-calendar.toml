@@ -1,0 +1,58 @@
+name = "zoho-calendar"
+transport = "sse"
+url = "https://mcp.zoho.com/sse"
+auth_provider = "zoho"
+auth_header = "Authorization"
+auth_prefix = "Bearer "
+
+# Write-side tools for the zoho-calendar sink. Tool and field names depend on the tools enabled on
+# your Zoho MCP server: run `cuecal doctor`, and copy this file to <config dir>/mappings/ to adjust
+# it. Templates fill {title}, {start}/{end} (ISO 8601), {start_utc}/{end_utc}
+# (yyyyMMddTHHmmssZ), {tz}, {location}/{join_url}, {description} and {event_id}.
+[write]
+create_tool = "create_event"
+update_tool = "update_event"
+delete_tool = "delete_event"
+# Where the create tool's result holds the new event's ID.
+event_id_path = "data.event_id"
+
+# Optional: list events in a range so a first write can patch an existing event instead of
+# creating a second one (start within 15 minutes plus a similar title).
+list_tool = "list_events"
+items_path = "data.events"
+
+# Errors whose code matches one of these go to the pending queue instead of being retried blind.
+error_code_path = "error.code"
+error_message_path = "error.message"
+permission_error_codes = ["403", "FORBIDDEN", "PERMISSION_DENIED", "NO_PERMISSION"]
+
+# Attendees are never sent: the copy carries title, time, join URL and description only.
+[write.create_args]
+title = "{title}"
+start = "{start}"
+end = "{end}"
+timezone = "{tz}"
+location = "{location}"
+description = "{description}"
+
+[write.update_args]
+event_id = "{event_id}"
+title = "{title}"
+start = "{start}"
+end = "{end}"
+timezone = "{tz}"
+location = "{location}"
+description = "{description}"
+
+[write.delete_args]
+event_id = "{event_id}"
+
+[write.list_args]
+start = "{range_start}"
+end = "{range_end}"
+
+[write.field_mapping]
+id = "event_id"
+title = "title"
+start = "start"
+end = "end"

@@ -13,6 +13,17 @@ class SinkCredentialsError(RuntimeError):
     """Raised when a sink cannot make an authenticated request."""
 
 
+class SinkPermissionError(RuntimeError):
+    """Raised when a sink refuses to change an event the user may not edit.
+
+    ``payload`` is the raw upstream error (code and message) for the pending queue's reason.
+    """
+
+    def __init__(self, message: str, *, payload: str = "") -> None:
+        super().__init__(message)
+        self.payload = payload or message
+
+
 @dataclass
 class SinkEvent:
     id: str

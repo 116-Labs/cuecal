@@ -79,7 +79,9 @@ def test_zoho_mail_mapping_contract():
     source = load_source("zoho-mail")
     assert mapping.name == "zoho-mail"
     assert mapping.list_tool == "list_emails"
-    assert mapping.list_args.get("query") == ""
+    assert mapping.list_args == {"query": "", "cursor": "{cursor}", "limit": 50}
+    assert mapping.items_path == "data.emails"
+    assert mapping.cursor_path == "data.next_cursor"
 
     # Recorded sample response matching Zoho Mail schema
     sample_email = {
@@ -109,7 +111,9 @@ def test_zoho_cliq_mapping_contract():
     source = load_source("zoho-cliq")
     assert mapping.name == "zoho-cliq"
     assert mapping.list_tool == "list_messages"
-    assert mapping.list_args.get("query") == ""
+    assert mapping.list_args == {"query": "", "cursor": "{cursor}", "limit": 50}
+    assert mapping.items_path == "data.messages"
+    assert mapping.cursor_path == "data.next_cursor"
 
     # Recorded sample response matching Zoho Cliq schema
     sample_message = {
@@ -128,6 +132,15 @@ def test_zoho_cliq_mapping_contract():
     # Must fail loudly if mapped fields are missing
     with pytest.raises(MCPError, match="Failed to map message fields"):
         source._parse_message({"message_id": "cliq_112233"})
+
+
+def test_load_source_accepts_run_limits():
+    from cuecal.sources.mcp import load_source
+
+    # `cuecal run` passes the configured limits through.
+    source = load_source("zoho-mail", fetch_limit=7, latency_budget_seconds=2.5)
+    assert source.fetch_limit == 7
+    assert source.latency_budget_seconds == 2.5
 
 
 def test_mcp_fetch_limit():

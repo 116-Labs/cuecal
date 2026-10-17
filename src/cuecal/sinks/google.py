@@ -320,6 +320,40 @@ class GoogleCalendarSink:
         items = self.events_by_meeting_id(meeting_id)
         return parse_calendar_event(items[0]) if items else None
 
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        """Return the raw event, or None when Google no longer has it (404/410)."""
+        encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
+        encoded_event = urllib.parse.quote(event_id, safe="")
+        try:
+            return self._request("GET", f"/calendars/{encoded_cal}/events/{encoded_event}")
+        except urllib.error.HTTPError as err:
+            if err.code in (404, 410):
+                return None
+            raise
+
+    def current_candidate(self, event_id: str) -> MeetingCandidate | None:
+        """Read an event back as a candidate; None once it is deleted or cancelled.
+
+        Secondary sinks follow this one-way. Any other read failure raises, so a flaky read
+        never looks like a deletion.
+        """
+        event = self.get_event(event_id)
+        if not event or event.get("status") == "cancelled":
+            return None
+        parsed = parse_calendar_event(event)
+        uris = event_conference_uris(event)
+        location = (parsed.location or "").strip()
+        join_url = uris[0] if uris else (location if location.startswith("https://") else None)
+        return MeetingCandidate(
+            title=parsed.title,
+            start=parsed.start,
+            end=parsed.end,
+            tz=(event.get("start") or {}).get("timeZone"),
+            join_url=join_url,
+            meeting_id=parsed.meeting_id,
+            confidence=1.0,
+        )
+
     def create(self, c: MeetingCandidate) -> SinkEvent:
         """Create a new event from a MeetingCandidate (idempotent if meeting_id exists).
 

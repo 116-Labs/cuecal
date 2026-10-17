@@ -14,7 +14,8 @@ DEFAULT_CONFIG_TOML = """\
 # CueCal configuration. Secrets live in the OS keyring; reference them by name below.
 sources = []
 sink = "google-calendar"
-# Extra sinks written after the primary `sink`; failed writes retry on later runs.
+# Extra sinks written after the primary `sink`; failed writes retry on later runs. Each copy then
+# follows the primary event one-way (e.g. "zoho-calendar"; check its tools with `cuecal doctor`).
 secondary_sinks = []
 poll_interval_seconds = 300
 
