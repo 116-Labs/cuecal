@@ -19,13 +19,9 @@ sink = "google-calendar"
 secondary_sinks = []
 poll_interval_seconds = 300
 
-[llm]
-# Ordered extraction tiers; later tiers run only when earlier ones are not confident enough.
-tiers = ["regex", "local", "paid"]
-
 [thresholds]
+# Candidates at or above this confidence are created; the rest go to `cuecal pending`.
 auto_create = 0.85
-pending = 0.5
 
 [secrets]
 # provider = "keyring-entry-name"
@@ -46,7 +42,6 @@ _TOP_KEYS = {
     "sink",
     "secondary_sinks",
     "poll_interval_seconds",
-    "llm",
     "thresholds",
     "secrets",
     "gmail",
@@ -57,7 +52,6 @@ _TOP_KEYS = {
 }
 _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _TRANSPARENCIES = ("opaque", "transparent")
-_LLM_TIERS = {"regex", "local", "paid"}
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
 GOOGLE_SINK = "google-calendar"
 
@@ -101,9 +95,7 @@ class Config:
     sink: str = "google-calendar"
     secondary_sinks: list[str] = field(default_factory=list)
     poll_interval_seconds: int = 300
-    llm_tiers: list[str] = field(default_factory=lambda: ["regex", "local", "paid"])
     auto_create_threshold: float = 0.85
-    pending_threshold: float = 0.5
     secrets: dict[str, str] = field(default_factory=dict)
     gmail: GmailConfig = field(default_factory=GmailConfig)
     fetch_limit: int = 100
@@ -125,7 +117,22 @@ def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
     return table
 
 
+def _reject_removed_settings(data: dict[str, Any]) -> None:
+    removed = []
+    if "llm" in data:
+        removed.append("[llm]")
+    thresholds = data.get("thresholds")
+    if isinstance(thresholds, dict) and "pending" in thresholds:
+        removed.append("thresholds.pending")
+    if removed:
+        raise ConfigError(
+            f"{' and '.join(removed)} {'was' if len(removed) == 1 else 'were'} removed; "
+            "delete them from your config"
+        )
+
+
 def parse_config(data: dict[str, Any]) -> Config:
+    _reject_removed_settings(data)
     unknown = set(data) - _TOP_KEYS
     if unknown:
         raise ConfigError(f"unknown config keys: {', '.join(sorted(unknown))}")
@@ -155,25 +162,15 @@ def parse_config(data: dict[str, Any]) -> Config:
         raise ConfigError("poll_interval_seconds must be a positive integer")
     cfg.poll_interval_seconds = poll
 
-    llm = _table(data, "llm", {"tiers"})
-    tiers = llm.get("tiers", cfg.llm_tiers)
+    thresholds = _table(data, "thresholds", {"auto_create"})
+    auto_create = thresholds.get("auto_create", cfg.auto_create_threshold)
     if (
-        not isinstance(tiers, list)
-        or not tiers
-        or not all(isinstance(t, str) for t in tiers)
-        or set(tiers) - _LLM_TIERS
+        isinstance(auto_create, bool)
+        or not isinstance(auto_create, int | float)
+        or not 0 <= auto_create <= 1
     ):
-        raise ConfigError(f"llm.tiers must be a non-empty list drawn from {sorted(_LLM_TIERS)}")
-    cfg.llm_tiers = list(tiers)
-
-    thresholds = _table(data, "thresholds", {"auto_create", "pending"})
-    for key, attr in (("auto_create", "auto_create_threshold"), ("pending", "pending_threshold")):
-        value = thresholds.get(key, getattr(cfg, attr))
-        if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
-            raise ConfigError(f"thresholds.{key} must be a number between 0 and 1")
-        setattr(cfg, attr, float(value))
-    if cfg.pending_threshold > cfg.auto_create_threshold:
-        raise ConfigError("thresholds.pending must not exceed thresholds.auto_create")
+        raise ConfigError("thresholds.auto_create must be a number between 0 and 1")
+    cfg.auto_create_threshold = float(auto_create)
 
     secrets = data.get("secrets", {})
     if not isinstance(secrets, dict) or not all(
