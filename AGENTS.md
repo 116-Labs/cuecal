@@ -35,7 +35,7 @@ uv run pytest
 | `src/cuecal/extract/` | Tier 0 (link regex gate) and Tier 1 (`.ics` and known templates); Tiers 2–3 (LLM) are not built |
 | `src/cuecal/sinks/` | Sink protocol (`base.py`), Google Calendar sink, secondary-sink fan-out with retry |
 | `src/cuecal/` (rest) | Config, keyring secrets, SQLite state (`db.py`), plugin registry, pending notifier, launchd/Task Scheduler service, run lock |
-| `src/cuecal/eval/` | Eval fixture schema |
+| `src/cuecal/eval/` | Eval fixture schema and the `cuecal eval` runner (`runner.py`) |
 | `scripts/` | `release.sh` (publish a release) and the `block_commit.sh` hook |
 | `tests/` | pytest suite, one `test_<module>.py` per module; fixtures and a stub MCP server |
 
