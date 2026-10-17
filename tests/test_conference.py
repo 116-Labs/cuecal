@@ -140,6 +140,18 @@ def test_sink_replaces_zoho_when_organizer():
     assert len(client.mutations) == 2
 
 
+def test_replace_keeps_original_meeting_id_findable():
+    event = _zoho_event(
+        organizer=True, extra={"extendedProperties": {"private": {"cuecalMeetingId": "zoom-1"}}}
+    )
+    client = RecordingClient(event)
+    GoogleCalendarSink(token_provider="t", http_client=client).provision_conference(
+        "ev1", _conf("organizer_only")
+    )
+    private = client.mutations[-1][3]["extendedProperties"]["private"]
+    assert private["cuecalMeetingId"] == "zoom-1"
+
+
 def _sink(client, **kwargs):
     return GoogleCalendarSink(
         token_provider="t", http_client=client, conference_poll_delay=0, **kwargs

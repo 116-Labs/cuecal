@@ -518,7 +518,8 @@ class GoogleCalendarSink:
                 return plan
 
         private = dict((event.get("extendedProperties") or {}).get("private") or {})
-        private["cuecalMeetingId"] = code
+        # An existing ID stays: create() finds this event by the original meeting ID.
+        private.setdefault("cuecalMeetingId", code)
         meta: dict[str, Any] = {"extendedProperties": {"private": private}}
         # Keep a physical location; only an empty one or a replaced provider's URL is overwritten.
         location = (event.get("location") or "").strip()

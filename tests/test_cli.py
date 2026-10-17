@@ -1597,3 +1597,149 @@ def test_cli_run_still_creates_meeting_when_sink_dedupe_lookup_fails(tmp_path, m
     assert [c.meeting_id for c in sink.created] == ["mtg1"]
 
 
+def _run_with_conference_sink(tmp_path, monkeypatch, *, conference, argv, provision):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    class DummySource:
+        name = "dummy"
+
+        def fetch_since(self, cursor):
+            msg = Message(
+                id="msg1", source="dummy", sender="test", ts=datetime.now(), text="test text"
+            )
+            return [msg], "cursor_next"
+
+    class ConferenceSink:
+        name = "conference-sink"
+
+        def create_event(self, candidate):
+            return "event1"
+
+    if provision is not None:
+        ConferenceSink.provision_conference = lambda self, event_id, conf: provision(
+            event_id, conf
+        )
+
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: DummySource if kind == "sources" else ConferenceSink(),
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda msg: MeetingCandidate(
+            confidence=0.9, meeting_id="mtg1", title="test", start=None, end=None
+        ),
+    )
+    assert cli.main(["init"]) == 0
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text().replace("sources = []", 'sources = ["dummy"]') + conference
+    )
+    return cli.main([*argv, "run", "--once"])
+
+
+def test_cli_run_provisions_conference_on_created_event_without_replacing_links(
+    tmp_path, monkeypatch
+):
+    calls = []
+    status = _run_with_conference_sink(
+        tmp_path,
+        monkeypatch,
+        conference='\n[conference]\nprovision_for = "any_linkless"\nreplace = ["zoom"]\n',
+        argv=[],
+        provision=lambda event_id, conf: calls.append((event_id, conf.replace)),
+    )
+    assert status == 0
+    assert calls == [("event1", [])]
+
+
+def test_cli_run_skips_organizer_only_conference_provisioning(tmp_path, monkeypatch, caplog):
+    calls = []
+    status = _run_with_conference_sink(
+        tmp_path,
+        monkeypatch,
+        conference='\n[conference]\nprovision_for = "organizer_only"\nreplace = ["zoom"]\n',
+        argv=[],
+        provision=lambda event_id, conf: calls.append(event_id),
+    )
+    assert status == 0
+    assert calls == []
+    assert "organizer_only" in caplog.text
+    assert "zoom" in caplog.text
+
+
+def test_cli_run_skips_conference_for_sink_without_provisioning(tmp_path, monkeypatch, caplog):
+    import sqlite3
+
+    status = _run_with_conference_sink(
+        tmp_path,
+        monkeypatch,
+        conference='\n[conference]\nprovision_for = "any_linkless"\n',
+        argv=[],
+        provision=None,
+    )
+    assert status == 0
+    assert "conference provisioning failed" not in caplog.text
+    conn = sqlite3.connect(tmp_path / "state.db")
+    assert conn.execute("SELECT sink_event_id FROM event_link").fetchone() == ("event1",)
+
+
+def test_provision_conference_swallows_sink_construction_failure(monkeypatch, caplog):
+    def explode(plugin):
+        raise RuntimeError("cannot build sink")
+
+    monkeypatch.setattr("cuecal.cli.fanout.instantiate", explode)
+    cfg = cli.Config()
+    cfg.conference.provision_for = "any_linkless"
+    cli._provision_conference(cfg, object(), "event1")
+    assert "conference provisioning failed for event event1: cannot build sink" in caplog.text
+
+
+def test_cli_run_skips_conference_provisioning_when_off(tmp_path, monkeypatch):
+    calls = []
+    status = _run_with_conference_sink(
+        tmp_path,
+        monkeypatch,
+        conference="",
+        argv=[],
+        provision=lambda event_id, conf: calls.append(event_id),
+    )
+    assert status == 0
+    assert calls == []
+
+
+def test_cli_dry_run_never_provisions_conference(tmp_path, monkeypatch):
+    calls = []
+    status = _run_with_conference_sink(
+        tmp_path,
+        monkeypatch,
+        conference='\n[conference]\nprovision_for = "any_linkless"\n',
+        argv=["--dry-run"],
+        provision=lambda event_id, conf: calls.append(event_id),
+    )
+    assert status == 0
+    assert calls == []
+
+
+def test_cli_run_keeps_event_when_conference_provisioning_fails(tmp_path, monkeypatch, caplog):
+    import sqlite3
+
+    def boom(event_id, conf):
+        raise RuntimeError("meet api down")
+
+    status = _run_with_conference_sink(
+        tmp_path,
+        monkeypatch,
+        conference='\n[conference]\nprovision_for = "any_linkless"\n',
+        argv=[],
+        provision=boom,
+    )
+    assert status == 0
+    assert "conference provisioning failed for event event1: meet api down" in caplog.text
+    conn = sqlite3.connect(tmp_path / "state.db")
+    assert conn.execute("SELECT sink_event_id FROM event_link").fetchone() == ("event1",)
+    assert conn.execute("SELECT COUNT(*) FROM pending").fetchone() == (0,)
+
+

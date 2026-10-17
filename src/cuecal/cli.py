@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import re
@@ -62,6 +63,38 @@ def _matches_sink_event(cand: MeetingCandidate, sink: Any | None) -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("sink dedupe lookup failed for %r: %s", cand.title, exc)
         return False
+
+
+def _provision_conference(cfg: Config, sink_plugin: Any, event_id: str) -> None:
+    """Add a Meet link to a just-created linkless event; the event exists, so never fatal.
+
+    cuecal is always the organizer of what it creates, so the organizer guard proves nothing
+    here: `organizer_only` is skipped and no provider link is replaced.
+    """
+    if cfg.conference.provision_for != "any_linkless":
+        return
+    conf = dataclasses.replace(cfg.conference, replace=[])
+    try:
+        sink = fanout.instantiate(sink_plugin)
+        if not hasattr(sink, "provision_conference"):
+            return
+        sink.provision_conference(event_id, conf)
+    except Exception as exc:  # noqa: BLE001 - the event is created; provisioning is best effort
+        logger.warning("conference provisioning failed for event %s: %s", event_id, exc)
+
+
+def _warn_unsupported_conference(cfg: Config) -> None:
+    if cfg.conference.provision_for == "organizer_only":
+        logger.warning(
+            "conference provisioning for 'organizer_only' is not applied on cuecal run: "
+            "cuecal creates events as organizer; only 'any_linkless' is supported"
+        )
+    if cfg.conference.replace:
+        logger.warning(
+            "conference link replacement (%s) is not applied on cuecal run: "
+            "created events only receive links when linkless",
+            ", ".join(cfg.conference.replace),
+        )
 
 
 def _queue_pending(
@@ -173,6 +206,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_id = db.record_run_start(conn)
         try:
             cfg = load_config(paths.config_path())
+            _warn_unsupported_conference(cfg)
             from cuecal.extract import extract
 
             sink_plugin = None
@@ -337,6 +371,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     )
                                 else:
                                     logger.info("created event %r", event_id)
+                                    _provision_conference(cfg, sink_plugin, event_id)
                         else:
                             reason = (
                                 val_reason
