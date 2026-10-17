@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from cuecal.dedupe import is_duplicate
+from cuecal.dedupe import is_duplicate, reconcile_pending
 from cuecal.models import MeetingCandidate, SinkEvent
 from cuecal.sinks.google import GoogleCalendarSink
 
@@ -251,3 +251,205 @@ def test_identical_meeting_distinct_sources():
 
     is_dup_2 = is_duplicate(email_candidate, sink, conn)
     assert is_dup_2 is True
+
+
+def test_reconcile_pending_matching_calendar_event(tmp_path):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(
+        title="Weekly Sync",
+        start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 11, 0, tzinfo=UTC),
+        meeting_id="meet_101",
+    )
+    pid = db.add_pending(conn, candidate=cand, source="slack", message_id="msg_1")
+
+    sink = MockSink("mock")
+    ev = SinkEvent(
+        id="evt_101",
+        title="Weekly Sync",
+        start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 11, 0, tzinfo=UTC),
+        cuecal_meeting_id="meet_101",
+    )
+    sink.events["evt_101"] = ev
+    sink.by_meeting_id["meet_101"] = ev
+
+    reconciled = reconcile_pending(conn, sink)
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == pid
+    assert db.get_pending(conn, pid)["status"] == "reconciled"
+    assert db.list_pending(conn, status="pending") == []
+
+
+def test_reconcile_pending_preserves_unrelated_and_retries_safely(tmp_path):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    cand_match = MeetingCandidate(
+        title="Sprint Planning",
+        start=datetime(2026, 10, 5, 9, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        meeting_id="plan_1",
+    )
+    cand_other = MeetingCandidate(
+        title="Doctor Appt",
+        start=datetime(2026, 10, 5, 15, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 16, 0, tzinfo=UTC),
+        meeting_id="doc_2",
+    )
+    pid_match = db.add_pending(conn, candidate=cand_match, source="slack", message_id="m1")
+    pid_other = db.add_pending(conn, candidate=cand_other, source="slack", message_id="m2")
+
+    sink = MockSink("mock")
+    ev = SinkEvent(
+        id="evt_p1",
+        title="Sprint Planning",
+        start=datetime(2026, 10, 5, 9, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        cuecal_meeting_id="plan_1",
+    )
+    sink.events["evt_p1"] = ev
+    sink.by_meeting_id["plan_1"] = ev
+
+    # First reconciliation: reconciles matching candidate, preserves unrelated
+    reconciled = reconcile_pending(conn, sink)
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == pid_match
+    assert db.get_pending(conn, pid_match)["status"] == "reconciled"
+    assert db.get_pending(conn, pid_other)["status"] == "pending"
+    assert [p["id"] for p in db.list_pending(conn)] == [pid_other]
+
+    # Repeated reconciliation: safe to retry, leaves unrelated pending and reconciled intact
+    retry_reconciled = reconcile_pending(conn, sink)
+    assert retry_reconciled == []
+    assert db.get_pending(conn, pid_match)["status"] == "reconciled"
+    assert db.get_pending(conn, pid_other)["status"] == "pending"
+    assert [p["id"] for p in db.list_pending(conn)] == [pid_other]
+
+
+def test_reconcile_pending_fuzzy_time_and_title_match(tmp_path):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(
+        title="Design review",
+        start=datetime(2026, 10, 5, 10, 5, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 10, 35, tzinfo=UTC),
+    )
+    pid = db.add_pending(conn, candidate=cand, source="gmail", message_id="g1")
+
+    sink = MockSink("mock")
+    sink.events["evt_f"] = SinkEvent(
+        id="evt_f",
+        title="Design Review Sync",
+        start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 10, 30, tzinfo=UTC),
+    )
+
+    reconciled = reconcile_pending(conn, sink)
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == pid
+    assert db.get_pending(conn, pid)["status"] == "reconciled"
+
+
+def test_reconcile_pending_conference_id_match(tmp_path):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(
+        title="Sync",
+        start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 10, 30, tzinfo=UTC),
+        meeting_id="zoom_999",
+    )
+    pid = db.add_pending(conn, candidate=cand, source="slack", message_id="s1")
+
+    sink = MockSink("mock")
+    sink.events["evt_c"] = SinkEvent(
+        id="evt_c",
+        title="Untitled Meeting",
+        start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        end=datetime(2026, 10, 5, 10, 30, tzinfo=UTC),
+        conference_meeting_ids=("zoom_999",),
+    )
+
+    reconciled = reconcile_pending(conn, sink)
+    assert len(reconciled) == 1
+    assert reconciled[0]["id"] == pid
+    assert db.get_pending(conn, pid)["status"] == "reconciled"
+
+
+
+def test_reconcile_pending_naive_pending_start_does_not_raise_against_aware_candidate(tmp_path):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    naive = MeetingCandidate(title="Design review", start=datetime(2026, 10, 5, 10, 0))
+    pid = db.add_pending(conn, candidate=naive, source="gmail", message_id="g1")
+    delivered = MeetingCandidate(
+        title="Design review", start=datetime(2026, 10, 5, 10, 5, tzinfo=UTC)
+    )
+
+    reconciled = reconcile_pending(conn, candidate=delivered)
+    assert [r["id"] for r in reconciled] == [pid]
+
+
+def test_reconcile_pending_conflicting_meeting_ids_do_not_match_by_title_and_time(tmp_path):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    pending = MeetingCandidate(title="Weekly Sync", start=start, meeting_id="zoom_111")
+    pid = db.add_pending(conn, candidate=pending, source="slack", message_id="s1")
+    delivered = MeetingCandidate(title="Weekly Sync", start=start, meeting_id="zoom_222")
+
+    assert reconcile_pending(conn, candidate=delivered) == []
+    assert db.get_pending(conn, pid)["status"] == "pending"
+
+
+def test_reconcile_pending_sink_event_with_other_meeting_id_does_not_match_by_title_and_time(
+    tmp_path,
+):
+    from cuecal import db
+
+    conn = db.connect(tmp_path / "state.db")
+    start = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    pending = MeetingCandidate(title="Weekly Sync", start=start, meeting_id="zoom_111")
+    pid = db.add_pending(conn, candidate=pending, source="slack", message_id="s1")
+    sink = MockSink("mock")
+    sink.events["evt_other"] = SinkEvent(
+        id="evt_other",
+        title="Weekly Sync",
+        start=start,
+        end=datetime(2026, 10, 5, 10, 30, tzinfo=UTC),
+        cuecal_meeting_id="zoom_222",
+    )
+    delivered = MeetingCandidate(title="Weekly Sync", start=start, meeting_id="zoom_222")
+
+    assert reconcile_pending(conn, sink, candidate=delivered) == []
+    assert db.get_pending(conn, pid)["status"] == "pending"
+
+
+def test_reconcile_pending_sink_class_is_instantiated_for_calendar_lookups(tmp_path):
+    from cuecal import db
+
+    class NoArgSink(MockSink):
+        def __init__(self):
+            super().__init__("mock")
+
+        def find_by_meeting_id(self, meeting_id):
+            return SinkEvent(
+                id="evt",
+                title="Sync",
+                start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+                end=datetime(2026, 10, 5, 10, 30, tzinfo=UTC),
+            )
+
+    conn = db.connect(tmp_path / "state.db")
+    cand = MeetingCandidate(title="Sync", meeting_id="zoom_999")
+    pid = db.add_pending(conn, candidate=cand, source="slack", message_id="s1")
+
+    reconciled = reconcile_pending(conn, NoArgSink)
+    assert [r["id"] for r in reconciled] == [pid]

@@ -171,6 +171,12 @@ def test_pending_crud_helpers(tmp_path):
     assert db.get_pending(conn, pid2)["status"] == "approved"
     assert db.list_pending(conn, status="pending") == []
 
+    # Add another and reconcile
+    pid3 = db.add_pending(conn, candidate=cand, reason="Review")
+    assert db.reconcile_pending(conn, pid3) is True
+    assert db.get_pending(conn, pid3)["status"] == "reconciled"
+    assert db.list_pending(conn, status="pending") == []
+
 
 def test_add_pending_dedupes_on_source_and_message(tmp_path):
     from cuecal.models import MeetingCandidate

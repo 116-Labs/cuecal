@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from cuecal import db
+from cuecal.dedupe import reconcile_pending
 from cuecal.models import MeetingCandidate
 from cuecal.sinks.base import SinkPermissionError
 
@@ -91,7 +92,8 @@ def deliver(
     to registry plugins; ``None`` marks a configured sink with no registered plugin. A secondary
     that already holds an event for this meeting is not written again.
     """
-    event_id = create_on_sink(instantiate(primary), c)
+    primary_sink = instantiate(primary)
+    event_id = create_on_sink(primary_sink, c)
     _link(conn, c, primary_name, event_id)
     candidate_json = c.to_json()
     primary_id = db.add_sink_delivery(
@@ -110,6 +112,10 @@ def deliver(
             conn, sink=name, candidate_json=candidate_json, meeting_id=c.meeting_id
         )
         _write_secondary(conn, delivery_id, name, plugin, c)
+    try:
+        reconcile_pending(conn, primary_sink, candidate=c)
+    except Exception as exc:  # noqa: BLE001 - the event is already written; cleanup must not fail it
+        logger.warning("pending reconcile failed for %r: %s", c.title, exc)
     return event_id
 
 
