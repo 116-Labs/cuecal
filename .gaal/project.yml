@@ -40,8 +40,7 @@ review:
   require_last_push_approval: false
   code_owner_reviews: true
   required_checks:
-    - test (ubuntu-latest)
-    - test (windows-latest)
+    - test
     - zizmor
 limits:
   implement_attempts: 3

@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  test-matrix:
     strategy:
       fail-fast: false
       matrix:
@@ -22,6 +22,18 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: uv run ruff check .
       - run: uv run pytest
+
+  # Stable required-check name whatever the matrix holds. `always()` keeps a
+  # failed or cancelled leg from turning this job into a skipped, passing check.
+  test:
+    if: always()
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.test-matrix.result }}
+        run: test "$RESULT" = success
 
   # Static audit of the workflows themselves: the repo is public, so an
   # unpinned action or an over-broad token is a real exposure. Fails on any
