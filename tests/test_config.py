@@ -15,8 +15,35 @@ def test_default_config_loads(tmp_path):
     cfg = load_config(path)
     assert cfg.sink == "google-calendar"
     assert cfg.poll_interval_seconds == 300
-    assert cfg.llm_tiers == ["regex", "local", "paid"]
     assert cfg.auto_create_threshold == 0.85
+
+
+def test_default_config_omits_removed_llm_and_pending_settings():
+    assert "[llm]" not in DEFAULT_CONFIG_TOML
+    assert "pending =" not in DEFAULT_CONFIG_TOML
+
+
+def test_v0_1_1_starter_config_names_the_removed_settings(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[llm]\ntiers = ["regex", "local"]\n\n[thresholds]\nauto_create = 0.85\npending = 0.5\n'
+    )
+    with pytest.raises(
+        ConfigError, match=r"\[llm\] and thresholds.pending were removed; delete them"
+    ):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"llm": {"tiers": ["regex"]}}, r"\[llm\] was removed"),
+        ({"thresholds": {"pending": 0.5}}, "thresholds.pending was removed"),
+    ],
+)
+def test_single_removed_setting_is_named(data, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
 
 
 def test_write_default_keeps_existing(tmp_path):
@@ -188,13 +215,9 @@ def test_mirror_target_accepts_the_google_sink_calendar(data):
         ({"sink": ""}, "sink"),
         ({"poll_interval_seconds": 0}, "poll_interval_seconds"),
         ({"poll_interval_seconds": True}, "poll_interval_seconds"),
-        ({"llm": {"tiers": ["gpt"]}}, "llm.tiers"),
-        ({"llm": {"tiers": [["regex"]]}}, "llm.tiers"),
         ({"secrets": {"slack": "xoxb-123"}}, "cuecal auth slack"),
         ({"secrets": {"google": "ya29.abc"}}, "raw token"),
-        ({"llm": {"extra": 1}}, "unknown keys in \\[llm\\]"),
         ({"thresholds": {"auto_create": 2}}, "thresholds.auto_create"),
-        ({"thresholds": {"auto_create": 0.4, "pending": 0.6}}, "must not exceed"),
         ({"secrets": {"slack": 5}}, "secrets"),
         ({"limits": {"fetch_limit": 0}}, "limits.fetch_limit"),
         ({"limits": {"fetch_limit": -1}}, "limits.fetch_limit"),
