@@ -1,0 +1,39 @@
+{
+  "id": "core-024-slack-zoom-reschedule-same-id",
+  "category": "invites",
+  "label": "reschedule",
+  "input": {
+    "text": "heads up, moved roadmap sync to Friday since Thu is the offsite :point_down:\nTopic: Q4 Roadmap Sync\nTime: Oct 16, 2026 04:00 PM Pacific Time (US and Canada)\nJoin Zoom Meeting\nhttps://us06web.zoom.us/j/84512345678?pwd=Zk9QaWxRb2V2Wkx0\n\nMeeting ID: 845 1234 5678\nPasscode: 482913",
+    "received_at": "2026-10-13T19:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "priya@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "Q4 Roadmap Sync",
+      "start": "2026-10-16T16:00:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://us06web.zoom.us/j/84512345678?pwd=Zk9QaWxRb2V2Wkx0",
+      "meeting_id": "84512345678",
+      "passcode": "482913",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Updated Zoom invite moves Thu Oct 15 15:00 PT to Fri Oct 16 16:00 PT, same meeting ID. Expected: the existing event is updated.",
+    "source_type": "slack",
+    "edge_cases": [
+      "reschedule",
+      "known_meeting_id"
+    ],
+    "expected_route": "update_existing",
+    "is_synthetic": true,
+    "origin": "intern assignment Part 3"
+  }
+}

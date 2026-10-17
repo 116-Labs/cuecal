@@ -1,0 +1,26 @@
+{
+  "id": "core-037-slack-bug-report-zoom-link",
+  "category": "negatives",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "bug: clicking https://zoom.us/j/89911122233 from the desktop app crashes on macOS 15, repro steps in the ticket",
+    "received_at": "2026-10-20T20:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792526400000900",
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "A Zoom join link quoted in a bug report. No meeting is being scheduled.",
+    "source_type": "slack",
+    "edge_cases": [
+      "link_without_meeting_intent"
+    ],
+    "expected_route": "drop",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "id": "core-006-zoom-recurring-series",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Topic: Platform Guild\nTime: Oct 15, 2026 10:00 AM Eastern Time (US and Canada)\n        Every week on Thu, until Dec 17, 2026, 10 occurrence(s)\n\nPlease download and import the following iCalendar (.ics) files to your calendar system.\n\nJoin Zoom Meeting\nhttps://zoom.us/j/85566600055?pwd=R3VpbGQ\n\nMeeting ID: 855 6660 0055\nPasscode: 909090",
+    "received_at": "2026-10-12T14:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Platform Guild",
+      "start": "2026-10-15T10:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://zoom.us/j/85566600055?pwd=R3VpbGQ",
+      "meeting_id": "85566600055",
+      "passcode": "909090",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Recurring Zoom series: the first occurrence is the expected candidate; every occurrence shares one meeting ID.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "recurring_series"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

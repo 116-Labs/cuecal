@@ -1,0 +1,27 @@
+{
+  "id": "core-038-scheduling-link-no-time",
+  "category": "negatives",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "Happy to chat about the role! Grab any 30-min slot that works for you: https://cal.example.com/priya-example/30min",
+    "received_at": "2026-10-19T17:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "priya.example@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "A booking-page link. No time is chosen yet; the booking confirmation (a later message) is the real invite.",
+    "source_type": "email",
+    "edge_cases": [
+      "scheduling_link",
+      "proposal_without_time"
+    ],
+    "expected_route": "drop",
+    "is_synthetic": true
+  }
+}

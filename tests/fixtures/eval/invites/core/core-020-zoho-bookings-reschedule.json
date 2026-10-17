@@ -1,0 +1,38 @@
+{
+  "id": "core-020-zoho-bookings-reschedule",
+  "category": "invites",
+  "label": "reschedule",
+  "input": {
+    "text": "Your appointment has been rescheduled.\n\nService: Product Demo (30 mins)\nOld Date & Time: Oct 23, 2026 at 02:30 PM\nNew Date & Time: Oct 27, 2026 at 11:00 AM\nTime Zone: Asia/Kolkata\n\nJoin Zoom Meeting\nhttps://zoom.us/j/82211100077?pwd=RGVtbzMw\nMeeting ID: 822 1110 0077\nPasscode: 303030",
+    "received_at": "2026-10-21T05:30:00Z",
+    "recipient_tz": "Asia/Kolkata",
+    "sender": "bookings@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "Product Demo",
+      "start": "2026-10-27T11:00:00+05:30",
+      "end": "2026-10-27T11:30:00+05:30",
+      "tz": "Asia/Kolkata",
+      "join_url": "https://zoom.us/j/82211100077?pwd=RGVtbzMw",
+      "meeting_id": "82211100077",
+      "passcode": "303030",
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Reschedule of core-017 (same meeting ID). Both the old and new times appear; the NEW time is the answer.",
+    "source_type": "zoho_bookings",
+    "edge_cases": [
+      "reschedule",
+      "old_and_new_time"
+    ],
+    "expected_route": "update_existing",
+    "is_synthetic": true
+  }
+}

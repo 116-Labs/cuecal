@@ -1,0 +1,27 @@
+{
+  "id": "core-040-zoom-ai-summary",
+  "category": "negatives",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "Meeting summary for Weekly Platform Sync (10/13/2026)\n\nQuick recap\nThe team reviewed the Q4 roadmap...\n\nNext steps\n- Lena: draft the migration plan\n\nView the full summary: https://zoom.us/j/81122334455/summary",
+    "received_at": "2026-10-13T19:05:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "no-reply@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "Zoom AI Companion summary after the meeting. It links to a past meeting ID; nothing to schedule.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "post_meeting_summary",
+      "link_with_known_meeting_id"
+    ],
+    "expected_route": "drop",
+    "is_synthetic": true
+  }
+}

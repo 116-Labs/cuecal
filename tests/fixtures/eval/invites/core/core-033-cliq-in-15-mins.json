@@ -1,0 +1,39 @@
+{
+  "id": "core-033-cliq-in-15-mins",
+  "category": "chat",
+  "label": "reschedule",
+  "input": {
+    "text": "standup's running late, starting in 15 mins instead: https://us02web.zoom.us/j/86600011122?pwd=TGF0ZQ",
+    "received_at": "2026-10-22T16:20:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "lead.example@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "reschedule",
+    "candidate": {
+      "title": "Standup",
+      "start": "2026-10-22T09:35:00-07:00",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://us02web.zoom.us/j/86600011122?pwd=TGF0ZQ",
+      "meeting_id": "86600011122",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.75,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "'in 15 mins' from 16:20Z (09:20 PDT) is 09:35 PDT. It moves today's standup rather than creating a new meeting.",
+    "source_type": "zoho_cliq",
+    "edge_cases": [
+      "relative_time",
+      "implied_tz",
+      "reschedule"
+    ],
+    "expected_route": "update_existing",
+    "is_synthetic": true
+  }
+}

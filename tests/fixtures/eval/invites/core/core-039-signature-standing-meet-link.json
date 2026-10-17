@@ -1,0 +1,26 @@
+{
+  "id": "core-039-signature-standing-meet-link",
+  "category": "negatives",
+  "label": "not_invite",
+  "input": {
+    "text": "Thanks, the invoice looks right and I've approved it.\n\n--\nAlex Example | Finance\nOffice hours (Tue/Thu): https://meet.google.com/off-hour-slt",
+    "received_at": "2026-10-20T18:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "alex.example@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "not_invite",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "A standing Meet link in an email signature. The message itself has nothing to do with a meeting.",
+    "source_type": "email",
+    "edge_cases": [
+      "standing_link_in_signature"
+    ],
+    "expected_route": "drop",
+    "is_synthetic": true
+  }
+}

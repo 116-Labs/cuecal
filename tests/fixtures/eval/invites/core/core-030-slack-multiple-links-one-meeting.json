@@ -1,0 +1,39 @@
+{
+  "id": "core-030-slack-multiple-links-one-meeting",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Agenda doc: https://docs.example.com/d/agenda-q4 · last week's recording: https://zoom.us/rec/share/AbCdEfExample · today's call at 2pm ET is here: https://meet.google.com/qwe-rtyu-iop",
+    "received_at": "2026-10-19T15:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792422000000400",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Call",
+      "start": "2026-10-19T14:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://meet.google.com/qwe-rtyu-iop",
+      "meeting_id": "qwe-rtyu-iop",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.8,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Three links; only the Meet link is a meeting to join. The Zoom recording must not become the join link.",
+    "source_type": "slack",
+    "edge_cases": [
+      "multiple_links",
+      "recording_link",
+      "explicit_tz_abbrev"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

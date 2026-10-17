@@ -1,0 +1,39 @@
+{
+  "id": "core-032-slack-cancel-tomorrow-1on1",
+  "category": "chat",
+  "label": "cancel",
+  "input": {
+    "text": "need to cancel our 1:1 tomorrow, slammed with the launch. same link next week? https://zoom.us/j/85544433322",
+    "received_at": "2026-10-21T23:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792710000000600",
+    "attachments": []
+  },
+  "expected": {
+    "label": "cancel",
+    "candidate": {
+      "title": "1:1",
+      "start": "2026-10-22",
+      "end": null,
+      "tz": "America/Los_Angeles",
+      "join_url": "https://zoom.us/j/85544433322",
+      "meeting_id": "85544433322",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.7,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Cancels tomorrow's (Thu Oct 22) 1:1. Only the date is known; match the existing event by meeting ID + date. The trailing 'same link next week?' is a proposal, not a new invite.",
+    "source_type": "slack",
+    "edge_cases": [
+      "cancellation",
+      "relative_date",
+      "date_only"
+    ],
+    "expected_route": "cancel_existing",
+    "is_synthetic": true
+  }
+}

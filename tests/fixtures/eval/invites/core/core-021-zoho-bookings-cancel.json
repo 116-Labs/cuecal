@@ -1,0 +1,38 @@
+{
+  "id": "core-021-zoho-bookings-cancel",
+  "category": "invites",
+  "label": "cancel",
+  "input": {
+    "text": "Your appointment has been cancelled.\n\nService: Onboarding Call\nDate & Time: Oct 26, 2026 at 10:00 AM\nTime Zone: America/New_York\nReason: Customer requested.",
+    "received_at": "2026-10-22T13:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "bookings@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "cancel",
+    "candidate": {
+      "title": "Onboarding Call",
+      "start": "2026-10-26T10:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": null,
+      "meeting_id": null,
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Cancellation of core-018. The email carries no link; matching it to the booked event needs the service + time (the meeting ID comes from the original booking).",
+    "source_type": "zoho_bookings",
+    "edge_cases": [
+      "cancellation",
+      "linkless"
+    ],
+    "expected_route": "cancel_existing",
+    "is_synthetic": true
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "id": "core-028-slack-next-tuesday-10",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Let's pick up the API versioning discussion next Tuesday at 10, zoom: https://zoom.us/j/83377700099",
+    "received_at": "2026-10-15T19:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792609200000300",
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "API versioning discussion",
+      "start": "2026-10-20T10:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://zoom.us/j/83377700099",
+      "meeting_id": "83377700099",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.7,
+      "tier": "llm"
+    }
+  },
+  "metadata": {
+    "description": "Received Thu Oct 15 (15:00 EDT); 'next Tuesday' is Oct 20 and 'at 10' is read as 10 AM.",
+    "source_type": "slack",
+    "edge_cases": [
+      "relative_date",
+      "implied_tz",
+      "implied_ampm"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true
+  }
+}

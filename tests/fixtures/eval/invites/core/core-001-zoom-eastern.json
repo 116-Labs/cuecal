@@ -1,0 +1,37 @@
+{
+  "id": "core-001-zoom-eastern",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Hi all,\n\nRavi Example is inviting you to a scheduled Zoom meeting.\n\nTopic: Q4 Budget Walkthrough\nTime: Oct 22, 2026 09:00 AM Eastern Time (US and Canada)\n\nJoin Zoom Meeting\nhttps://us05web.zoom.us/j/81234500011?pwd=QnVkZ2V0V2Fsaw\n\nMeeting ID: 812 3450 0011\nPasscode: 230517",
+    "received_at": "2026-10-14T13:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "organizer@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Q4 Budget Walkthrough",
+      "start": "2026-10-22T09:00:00-04:00",
+      "end": null,
+      "tz": "America/New_York",
+      "join_url": "https://us05web.zoom.us/j/81234500011?pwd=QnVkZ2V0V2Fsaw",
+      "meeting_id": "81234500011",
+      "passcode": "230517",
+      "attendees": [],
+      "confidence": 0.95,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Standard Zoom invite email, Eastern Time.",
+    "source_type": "zoom_email",
+    "edge_cases": [
+      "explicit_tz"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

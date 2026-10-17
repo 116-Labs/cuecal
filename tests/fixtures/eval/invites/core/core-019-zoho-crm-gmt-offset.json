@@ -1,0 +1,38 @@
+{
+  "id": "core-019-zoho-crm-gmt-offset",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Meeting Invitation: Renewal Discussion - Example Logistics\n\nFrom: Oct 26, 2026 04:00 PM\nTo: Oct 26, 2026 05:00 PM\nTime Zone: (GMT -4:00) Eastern Daylight Time\nVenue: https://zoom.us/j/81100099088\nHost: Owen Example\n\nThis invitation was sent from Zoho CRM.",
+    "received_at": "2026-10-20T14:00:00Z",
+    "recipient_tz": "America/New_York",
+    "sender": "crm-notifications@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Renewal Discussion - Example Logistics",
+      "start": "2026-10-26T16:00:00-04:00",
+      "end": "2026-10-26T17:00:00-04:00",
+      "tz": "America/New_York",
+      "join_url": "https://zoom.us/j/81100099088",
+      "meeting_id": "81100099088",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoho CRM layout: separate From:/To: lines and a '(GMT -4:00) Eastern Daylight Time' zone label.",
+    "source_type": "zoho_crm",
+    "edge_cases": [
+      "gmt_offset_label",
+      "from_to_lines"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

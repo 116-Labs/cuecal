@@ -1,0 +1,27 @@
+{
+  "id": "core-035-zoom-recording-share",
+  "category": "negatives",
+  "label": "mentions_meeting",
+  "input": {
+    "text": "Recording for Tuesday's design crit is up: https://zoom.us/rec/share/Xy12AbCdExampleShare?startTime=1792602000000\nPasscode: Crit#2026",
+    "received_at": "2026-10-21T18:00:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "organizer@example.com",
+    "permalink": "https://example-workspace.slack.com/archives/C0EXAMPLE/p1792692000000800",
+    "attachments": []
+  },
+  "expected": {
+    "label": "mentions_meeting",
+    "candidate": null
+  },
+  "metadata": {
+    "description": "A Zoom recording share with a passcode. It mentions a past meeting; nothing to schedule.",
+    "source_type": "slack",
+    "edge_cases": [
+      "recording_link",
+      "passcode_present"
+    ],
+    "expected_route": "drop",
+    "is_synthetic": true
+  }
+}

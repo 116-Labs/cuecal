@@ -1,0 +1,39 @@
+{
+  "id": "core-017-zoho-bookings-zoom",
+  "category": "invites",
+  "label": "new_invite",
+  "input": {
+    "text": "Your appointment is confirmed.\n\nService: Product Demo (30 mins)\nDate & Time: Oct 23, 2026 at 02:30 PM\nTime Zone: Asia/Kolkata\nStaff: Meera Example\n\nJoin Zoom Meeting\nhttps://zoom.us/j/82211100077?pwd=RGVtbzMw\nMeeting ID: 822 1110 0077\nPasscode: 303030\n\nNeed to reschedule? Use the link in this email.",
+    "received_at": "2026-10-16T06:00:00Z",
+    "recipient_tz": "Asia/Kolkata",
+    "sender": "bookings@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Product Demo",
+      "start": "2026-10-23T14:30:00+05:30",
+      "end": "2026-10-23T15:00:00+05:30",
+      "tz": "Asia/Kolkata",
+      "join_url": "https://zoom.us/j/82211100077?pwd=RGVtbzMw",
+      "meeting_id": "82211100077",
+      "passcode": "303030",
+      "attendees": [],
+      "confidence": 0.9,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "Zoho Bookings confirmation: time zone on a separate 'Time Zone:' line, duration in the service name.",
+    "source_type": "zoho_bookings",
+    "edge_cases": [
+      "explicit_tz",
+      "iana_tz_line",
+      "duration_not_end"
+    ],
+    "expected_route": "auto_create",
+    "is_synthetic": true
+  }
+}

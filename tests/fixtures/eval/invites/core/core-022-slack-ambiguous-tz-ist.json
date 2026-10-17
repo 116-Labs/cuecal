@@ -1,0 +1,38 @@
+{
+  "id": "core-022-slack-ambiguous-tz-ist",
+  "category": "chat",
+  "label": "new_invite",
+  "input": {
+    "text": "Locking in the vendor demo :tada:\nWhen: Tue, Oct 20, 2026 10:00 AM IST\nhttps://us06web.zoom.us/j/87766554433?pwd=VmVuZG9yRGVtbzE",
+    "received_at": "2026-10-13T19:30:00Z",
+    "recipient_tz": "America/Los_Angeles",
+    "sender": "priya@example.com",
+    "permalink": null,
+    "attachments": []
+  },
+  "expected": {
+    "label": "new_invite",
+    "candidate": {
+      "title": "Vendor demo",
+      "start": "2026-10-20T10:00:00",
+      "end": null,
+      "tz": null,
+      "join_url": "https://us06web.zoom.us/j/87766554433?pwd=VmVuZG9yRGVtbzE",
+      "meeting_id": "87766554433",
+      "passcode": null,
+      "attendees": [],
+      "confidence": 0.4,
+      "tier": "template"
+    }
+  },
+  "metadata": {
+    "description": "IST is India, Irish or Israel time; must not be guessed. Expected: pending with a naive start.",
+    "source_type": "slack",
+    "edge_cases": [
+      "ambiguous_tz"
+    ],
+    "expected_route": "pending",
+    "is_synthetic": true,
+    "origin": "intern assignment Part 3"
+  }
+}
