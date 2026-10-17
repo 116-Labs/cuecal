@@ -355,9 +355,10 @@ class GoogleCalendarSink:
         )
 
     def create(self, c: MeetingCandidate) -> SinkEvent:
-        """Create a new event from a MeetingCandidate (idempotent if meeting_id exists).
+        """Create a new event from a MeetingCandidate.
 
-        A calendar mirror of the same meeting at the same time wins: it is returned untouched.
+        An event with the same meeting_id starting within SAME_MEETING_WINDOW is the same
+        meeting: a mirror is returned untouched, any other is updated. Other starts get a new event.
         """
         if c.meeting_id:
             items = self.events_by_meeting_id(c.meeting_id)
@@ -371,7 +372,9 @@ class GoogleCalendarSink:
                     c.meeting_id,
                 )
                 return parse_calendar_event(mirror)
-            own = next((i for i in items if not _mirror_of(i)), None)
+            own = next(
+                (i for i in items if not _mirror_of(i) and _starts_near(i, c.start)), None
+            )
             existing = parse_calendar_event(own) if own is not None else None
             if existing is not None:
                 logger.info(
