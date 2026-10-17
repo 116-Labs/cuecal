@@ -468,3 +468,44 @@ def test_delivery_without_meeting_id_is_tracked(conn):
         "synced": 1,
         "failed": 0,
     }
+
+
+def test_deliver_reconciles_matching_pending_candidate(conn):
+    pid_match = db.add_pending(conn, candidate=_cand(mid="mtg1"), source="slack", message_id="m1")
+    pid_other = db.add_pending(conn, candidate=_cand(mid="mtg2"), source="slack", message_id="m2")
+    fanout.deliver(
+        conn,
+        _cand(mid="mtg1"),
+        primary_name="google-calendar",
+        primary=RecordingSink("google-calendar", []),
+    )
+    assert db.get_pending(conn, pid_match)["status"] == "reconciled"
+    assert db.get_pending(conn, pid_other)["status"] == "pending"
+    assert [p["id"] for p in db.list_pending(conn)] == [pid_other]
+
+
+
+def test_deliver_with_sink_class_reconciles_through_calendar_lookup(conn):
+    class ClassSink(RecordingSink):
+        def __init__(self):
+            super().__init__("google-calendar", [])
+
+        def find_by_meeting_id(self, meeting_id):
+            return object() if meeting_id == "mtg2" else None
+
+    pid_present = db.add_pending(conn, candidate=_cand(mid="mtg2"), source="slack", message_id="m2")
+    pid_absent = db.add_pending(conn, candidate=_cand(mid="mtg3"), source="slack", message_id="m3")
+    fanout.deliver(conn, _cand(mid="mtg1"), primary_name="google-calendar", primary=ClassSink)
+    assert db.get_pending(conn, pid_present)["status"] == "reconciled"
+    assert db.get_pending(conn, pid_absent)["status"] == "pending"
+
+
+def test_deliver_succeeds_when_reconcile_raises(conn, monkeypatch):
+    def boom(*args, **kwargs):
+        raise TypeError("can't compare")
+
+    monkeypatch.setattr(fanout, "reconcile_pending", boom)
+    event_id = fanout.deliver(
+        conn, _cand(), primary_name="google-calendar", primary=RecordingSink("google-calendar", [])
+    )
+    assert event_id == "google-calendar-evt"

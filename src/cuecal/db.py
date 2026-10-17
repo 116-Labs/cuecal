@@ -595,6 +595,20 @@ def reject_pending(conn: sqlite3.Connection, pending_id: int) -> bool:
     return update_pending(conn, pending_id, status="rejected")
 
 
+def reconcile_pending(
+    conn: sqlite3.Connection,
+    target: Any | None = None,
+    *,
+    sink: Any | None = None,
+    candidate: Any | None = None,
+) -> Any:
+    if isinstance(target, int):
+        return update_pending(conn, target, status="reconciled")
+    from cuecal.dedupe import reconcile_pending as _reconcile
+
+    return _reconcile(conn, target, sink=sink, candidate=candidate)
+
+
 def record_near_miss(
     conn: sqlite3.Connection,
     *,
