@@ -61,11 +61,12 @@ def _queue_pending(
     snippet: str,
     source: str,
     message_id: str,
+    dedupe_by_meeting_id: bool = False,
 ) -> None:
     """Queue and notify once for a message, even if it is replayed on a later pass."""
     source = source or cand.source_ref or ""
     existing = None
-    if cand.meeting_id:
+    if dedupe_by_meeting_id and cand.meeting_id:
         existing = db.find_pending_by_meeting_id(conn, cand.meeting_id)
     if existing is None:
         existing = db.find_pending_by_message(conn, source=source, message_id=message_id)
@@ -123,6 +124,7 @@ def _sync_secondaries(
             snippet=failure.payload[:200],
             source=f"sink:{failure.sink}",
             message_id=failure.sink_event_id,
+            dedupe_by_meeting_id=False,
         )
 
 
@@ -329,6 +331,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                         snippet=snippet,
                                         source=source_name,
                                         message_id=message_id,
+                                        dedupe_by_meeting_id=True,
                                     )
                                 else:
                                     logger.info("created event %r", event_id)
@@ -357,6 +360,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     snippet=snippet,
                                     source=source_name,
                                     message_id=message_id,
+                                    dedupe_by_meeting_id=True,
                                 )
 
                     if next_cursor and not args.dry_run:

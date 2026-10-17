@@ -1306,6 +1306,50 @@ def test_cli_run_queues_secondary_permission_error_as_pending(tmp_path, monkeypa
     assert f"error: permission denied: {payload}" in capsys.readouterr().out
 
 
+def test_cli_run_secondary_permission_failure_not_suppressed_by_approved_pending_invite(
+    tmp_path, monkeypatch
+):
+    from cuecal.models import MeetingCandidate
+    from cuecal.sinks.base import SinkPermissionError
+
+    payload = '{"error": {"code": "PERMISSION_DENIED", "message": "event is read-only"}}'
+    calls = []
+    copy = _ZohoCopy(calls, fail=SinkPermissionError("refused", payload=payload))
+    primary = _secondary_sync_setup(tmp_path, monkeypatch, copy)
+    primary.current.title = "Roadmap v2"
+
+    conn = db.connect(tmp_path / "state.db")
+    approved_cand = MeetingCandidate.from_dict(primary.current.to_dict())
+    pending_id = db.add_pending(
+        conn,
+        candidate=approved_cand,
+        confidence=1.0,
+        reason="linkless invite",
+        source="email:test",
+        message_id="msg1",
+    )
+    db.update_pending(conn, pending_id, status="approved")
+    conn.close()
+
+    notified = []
+    monkeypatch.setattr(
+        "cuecal.cli.notify.notify_pending", lambda *a, **kw: notified.append(kw["pending_id"])
+    )
+
+    assert cli.main(["run", "--once"]) == 0
+    assert calls == [("update", "z1", "Roadmap v2")]
+
+    conn = db.connect(tmp_path / "state.db")
+    pending_items = db.list_pending(conn, status=None)
+    conn.close()
+
+    assert len(pending_items) == 2
+    failure_item = next(item for item in pending_items if item["source"] == "sink:zoho-calendar")
+    assert failure_item["message_id"] == "z1"
+    assert failure_item["status"] == "pending"
+    assert notified == [failure_item["id"]]
+
+
 def test_cli_run_dry_run_prints_planned_secondary_writes(tmp_path, monkeypatch, capsys):
     calls = []
     primary = _secondary_sync_setup(tmp_path, monkeypatch, _ZohoCopy(calls))
