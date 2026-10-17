@@ -10,8 +10,9 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil import parser as dateparser
 
@@ -99,8 +100,18 @@ def _mirror_of(event: dict[str, Any]) -> str | None:
 SAME_MEETING_WINDOW = timedelta(minutes=15)
 
 
-def _starts_near(event: dict[str, Any], start: datetime | None) -> bool:
-    """True when the event starts within 15 minutes of ``start`` (one recurring instance)."""
+def _zone(name: str | None) -> tzinfo:
+    try:
+        return ZoneInfo(name) if name else UTC
+    except (ZoneInfoNotFoundError, ValueError):
+        return UTC
+
+
+def _starts_near(event: dict[str, Any], start: datetime | None, tz: str | None = None) -> bool:
+    """True when the event starts within 15 minutes of ``start`` (one recurring instance).
+
+    A naive ``start`` is a wall time in ``tz``, as the event body sends it; an unknown zone is UTC.
+    """
     raw = (event.get("start") or {}).get("dateTime")
     if start is None or not raw:
         return False
@@ -109,9 +120,9 @@ def _starts_near(event: dict[str, Any], start: datetime | None) -> bool:
     except (ValueError, OverflowError):
         return False
     if ev_start.tzinfo is None:
-        ev_start = ev_start.replace(tzinfo=UTC)
+        ev_start = ev_start.replace(tzinfo=_zone((event.get("start") or {}).get("timeZone")))
     if start.tzinfo is None:
-        start = start.replace(tzinfo=UTC)
+        start = start.replace(tzinfo=_zone(tz))
     return abs(ev_start - start) <= SAME_MEETING_WINDOW
 
 
@@ -311,9 +322,15 @@ class GoogleCalendarSink:
     def events_by_meeting_id(self, meeting_id: str) -> list[dict[str, Any]]:
         """Return the raw, non-cancelled events carrying this ``cuecalMeetingId``."""
         encoded_cal = urllib.parse.quote(self.calendar_id, safe="")
-        params = {"privateExtendedProperty": f"cuecalMeetingId={meeting_id}"}
-        resp = self._request("GET", f"/calendars/{encoded_cal}/events", params=params)
-        return [i for i in resp.get("items", []) if i.get("status") != "cancelled"]
+        params: dict[str, Any] = {"privateExtendedProperty": f"cuecalMeetingId={meeting_id}"}
+        items: list[dict[str, Any]] = []
+        while True:
+            resp = self._request("GET", f"/calendars/{encoded_cal}/events", params=dict(params))
+            items.extend(i for i in resp.get("items", []) if i.get("status") != "cancelled")
+            token = resp.get("nextPageToken")
+            if not token:
+                return items
+            params["pageToken"] = token
 
     def find_by_meeting_id(self, meeting_id: str) -> SinkEvent | None:
         """Look up an existing sink event by its unique meeting ID."""
@@ -363,7 +380,7 @@ class GoogleCalendarSink:
         if c.meeting_id:
             items = self.events_by_meeting_id(c.meeting_id)
             mirror = next(
-                (i for i in items if _mirror_of(i) and _starts_near(i, c.start)), None
+                (i for i in items if _mirror_of(i) and _starts_near(i, c.start, c.tz)), None
             )
             if mirror is not None:
                 logger.info(
@@ -373,7 +390,7 @@ class GoogleCalendarSink:
                 )
                 return parse_calendar_event(mirror)
             own = next(
-                (i for i in items if not _mirror_of(i) and _starts_near(i, c.start)), None
+                (i for i in items if not _mirror_of(i) and _starts_near(i, c.start, c.tz)), None
             )
             existing = parse_calendar_event(own) if own is not None else None
             if existing is not None:

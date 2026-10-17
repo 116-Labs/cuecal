@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -331,6 +332,32 @@ def test_create_start_exactly_at_window_edge_updates_existing_without_duplicate(
 
     assert event.id == "earlier_1"
     assert [call[0] for call in client.calls] == ["GET", "PATCH"]
+
+
+def test_create_naive_candidate_start_is_compared_in_its_own_time_zone(sample_candidate):
+    candidate = replace(
+        sample_candidate,
+        start=datetime(2026, 10, 15, 13, 0),
+        end=datetime(2026, 10, 15, 14, 0),
+        tz="America/New_York",
+    )
+    same_instant = _event_at(
+        "2026-10-15T13:00:00-04:00", "2026-10-15T14:00:00-04:00", "abc-defg-hij"
+    )
+    event, client = _create_with_existing(candidate, same_instant)
+
+    assert event.id == "earlier_1"
+    assert [call[0] for call in client.calls] == ["GET", "PATCH"]
+
+
+def test_events_by_meeting_id_follows_every_result_page():
+    pages = {None: {"items": [{"id": "a"}], "nextPageToken": "t2"}, "t2": {"items": [{"id": "b"}]}}
+    client = MockHttpClient(
+        {"GET /calendars/primary/events": lambda params, _json: pages[params.get("pageToken")]}
+    )
+    sink = GoogleCalendarSink(token_provider="dummy", http_client=client)
+
+    assert [i["id"] for i in sink.events_by_meeting_id("abc-defg-hij")] == ["a", "b"]
 
 
 def test_update_event(sample_candidate):
