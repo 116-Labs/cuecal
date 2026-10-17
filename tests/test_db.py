@@ -33,6 +33,23 @@ def test_migrate_is_idempotent(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM seen_message").fetchone()[0] == 1
 
 
+def test_mark_seen_is_keyed_by_source_and_counted_per_source(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    db.mark_seen(conn, "gmail", "m1")
+    db.mark_seen(conn, "gmail", "m1")
+    db.mark_seen(conn, "slack", "m1")
+    assert db.is_seen(conn, "gmail", "m1")
+    assert not db.is_seen(conn, "gmail", "m2")
+    assert db.get_counts_by_source(conn) == {"gmail": 1, "slack": 1}
+
+
+def test_mark_seen_ignores_message_without_id(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    db.mark_seen(conn, "gmail", "")
+    assert not db.is_seen(conn, "gmail", "")
+    assert db.get_counts_by_source(conn) == {}
+
+
 def test_applies_only_outstanding_migrations(tmp_path, monkeypatch):
     conn = sqlite3.connect(tmp_path / "state.db")
     db.migrate(conn)
