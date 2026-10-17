@@ -276,6 +276,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     messages, next_cursor = source.fetch_since(cursor)
 
                     for msg in messages:
+                        if db.is_seen(conn, msg.source, msg.id):
+                            continue
                         cand = extract(msg)
                         if not cand:
                             # Dropped candidate: record near-miss with score based on
@@ -310,12 +312,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     confidence=0.0,
                                     reason="dropped by extractor (no link or template match)",
                                 )
+                                db.mark_seen(conn, msg.source, msg.id)
                             continue
 
                         if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
                             logger.info(
                                 "skipped duplicate meeting %r from %s", cand.title, msg.source
                             )
+                            if not args.dry_run:
+                                db.mark_seen(conn, msg.source, msg.id)
                             continue
 
                         # Check validation and confidence
@@ -336,6 +341,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     cand.title,
                                     msg.source,
                                 )
+                                if not args.dry_run:
+                                    db.mark_seen(conn, msg.source, msg.id)
                             elif args.dry_run:
                                 logger.info("dry-run: would create event for %r", cand.title)
                             elif sink_plugin:
@@ -372,6 +379,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 else:
                                     logger.info("created event %r", event_id)
                                     _provision_conference(cfg, sink_plugin, event_id)
+                                db.mark_seen(conn, msg.source, msg.id)
                         else:
                             reason = (
                                 val_reason
@@ -397,6 +405,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     source=source_name,
                                     message_id=message_id,
                                 )
+                                db.mark_seen(conn, msg.source, msg.id)
 
                     if next_cursor and not args.dry_run:
                         db.set_cursor(conn, source.name, next_cursor)

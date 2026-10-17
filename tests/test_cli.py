@@ -491,6 +491,186 @@ def test_cli_run_twice_queues_each_message_once(tmp_path, monkeypatch):
     assert len(notified) == 1
 
 
+def _counting_extract(monkeypatch, calls, candidate):
+    def fake_extract(message):
+        calls.append(message.id)
+        return candidate
+
+    monkeypatch.setattr("cuecal.extract.extract", fake_extract)
+
+
+def test_cli_run_does_not_reprocess_a_created_message(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    created = []
+
+    class Sink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            created.append(candidate.meeting_id)
+            return "evt"
+
+    msg = Message(id="msg1", source="dummy", sender="a", ts=datetime.now(), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else Sink(),
+    )
+    calls = []
+    _counting_extract(monkeypatch, calls, MeetingCandidate(confidence=0.9, title="T"))
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 0
+    assert cli.main(["run", "--once"]) == 0
+
+    assert calls == ["msg1"]
+    assert len(created) == 1
+    conn = db.connect(tmp_path / "state.db")
+    assert db.is_seen(conn, "dummy", "msg1")
+    assert db.get_counts_by_source(conn) == {"dummy": 1}
+
+
+def test_cli_run_records_near_miss_and_queued_messages_as_seen(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    messages = [
+        Message(id=i, source="dummy", sender="a", ts=datetime.now(), text="x")
+        for i in ("dropped", "queued")
+    ]
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source(messages) if kind == "sources" else object(),
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda m: None if m.id == "dropped" else MeetingCandidate(confidence=0.5, title="Q"),
+    )
+    monkeypatch.setattr("cuecal.notify.DesktopNotifier.send", lambda self, n: None)
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 0
+
+    conn = db.connect(tmp_path / "state.db")
+    assert db.is_seen(conn, "dummy", "dropped")
+    assert db.is_seen(conn, "dummy", "queued")
+
+
+def test_cli_run_dry_run_does_not_record_seen_messages(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    msg = Message(id="msg1", source="dummy", sender="a", ts=datetime.now(), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else object(),
+    )
+    calls = []
+    _counting_extract(monkeypatch, calls, MeetingCandidate(confidence=0.5, title="Q"))
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once", "--dry-run"]) == 0
+    assert cli.main(["run", "--once", "--dry-run"]) == 0
+
+    assert calls == ["msg1", "msg1"]
+    conn = db.connect(tmp_path / "state.db")
+    assert not db.is_seen(conn, "dummy", "msg1")
+
+
+def _run_duplicate_meeting_message(tmp_path, monkeypatch, argv):
+    from datetime import datetime
+
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    conn = db.connect(tmp_path / "state.db")
+    db.record_event_link(conn, "mtg1", "google-calendar", "evt_existing")
+    msg = Message(id="msg_b", source="dummy", sender="a", ts=datetime.now(), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else object(),
+    )
+    calls = []
+    _counting_extract(
+        monkeypatch, calls, MeetingCandidate(confidence=0.9, meeting_id="mtg1", title="T")
+    )
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(argv) == 0
+    assert cli.main(argv) == 0
+    return calls, conn
+
+
+def test_cli_run_does_not_reprocess_a_message_skipped_as_duplicate(tmp_path, monkeypatch):
+    calls, conn = _run_duplicate_meeting_message(tmp_path, monkeypatch, ["run", "--once"])
+
+    assert calls == ["msg_b"]
+    assert db.is_seen(conn, "dummy", "msg_b")
+
+
+def test_cli_run_dry_run_does_not_record_a_message_skipped_as_duplicate(tmp_path, monkeypatch):
+    calls, conn = _run_duplicate_meeting_message(
+        tmp_path, monkeypatch, ["run", "--once", "--dry-run"]
+    )
+
+    assert calls == ["msg_b", "msg_b"]
+    assert not db.is_seen(conn, "dummy", "msg_b")
+
+
+def _run_calendar_matched_message(tmp_path, monkeypatch, argv):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+    from cuecal.sinks.base import SinkEvent
+
+    assert cli.main(["init"]) == 0
+    existing = SinkEvent(
+        id="hand_made",
+        title="Roadmap sync with Sam",
+        start=datetime(2030, 1, 1, 15, 10, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 40, tzinfo=UTC),
+    )
+    sink = _DedupeSink(existing=[existing])
+    msg = Message(id="msg_c", source="dummy", sender="a", ts=datetime.now(), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else sink,
+    )
+    calls = []
+    _counting_extract(monkeypatch, calls, _timed_candidate(meeting_id=None))
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(argv) == 0
+    assert cli.main(argv) == 0
+    return calls, sink, db.connect(tmp_path / "state.db")
+
+
+def test_cli_run_does_not_reprocess_a_message_matching_a_calendar_event(tmp_path, monkeypatch):
+    calls, sink, conn = _run_calendar_matched_message(tmp_path, monkeypatch, ["run", "--once"])
+
+    assert calls == ["msg_c"]
+    assert sink.created == []
+    assert db.is_seen(conn, "dummy", "msg_c")
+
+
+def test_cli_run_dry_run_does_not_record_a_message_matching_a_calendar_event(
+    tmp_path, monkeypatch
+):
+    calls, sink, conn = _run_calendar_matched_message(
+        tmp_path, monkeypatch, ["run", "--once", "--dry-run"]
+    )
+
+    assert calls == ["msg_c", "msg_c"]
+    assert not db.is_seen(conn, "dummy", "msg_c")
+
+
 def test_cli_run_sink_failure_queues_candidate_and_finishes_pass(tmp_path, monkeypatch):
     from datetime import datetime
 
@@ -532,6 +712,7 @@ def test_cli_run_sink_failure_queues_candidate_and_finishes_pass(tmp_path, monke
     assert [(row["message_id"], row["reason"]) for row in rows] == [
         ("msg2", "sink error: ConnectionError: calendar unreachable")
     ]
+    assert db.is_seen(conn, "dummy", "msg2")
 
 
 def test_cli_run_without_google_credentials_logs_once_without_request(

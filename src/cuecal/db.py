@@ -263,6 +263,26 @@ def set_cursor(conn: sqlite3.Connection, source_name: str, cursor: str) -> None:
     conn.commit()
 
 
+def is_seen(conn: sqlite3.Connection, source: str, message_id: str) -> bool:
+    if not message_id:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM seen_message WHERE source = ? AND message_id = ?", (source, message_id)
+    ).fetchone()
+    return row is not None
+
+
+def mark_seen(conn: sqlite3.Connection, source: str, message_id: str) -> None:
+    """Record a handled source message; a message without an id cannot be recorded."""
+    if not message_id:
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO seen_message (source, message_id) VALUES (?, ?)",
+        (source, message_id),
+    )
+    conn.commit()
+
+
 def is_duplicate(conn: sqlite3.Connection, meeting_id: str, sink_name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM event_link WHERE meeting_id = ? AND sink = ?", (meeting_id, sink_name)
