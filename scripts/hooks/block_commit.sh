@@ -13,10 +13,41 @@ set -euo pipefail
 
 [[ "${CUECAL_SKIP_HOOKS:-0}" == "1" ]] && exit 0
 
+input="$(cat)"
+
+# Windows often has no `python3`, or only the Store stub, which exists but
+# fails; use the first interpreter that actually runs.
+py=""
+for candidate in python3 python py; do
+  if "$candidate" -c 'import json' >/dev/null 2>&1; then
+    py="$candidate"
+    break
+  fi
+done
+
 # A parse failure must still block: any exit but 2 lets the tool call through.
-if ! command="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("tool_input", {}).get("command", ""))')"; then
-  echo "cuecal: unable to parse hook input; refusing tool call." >&2
-  exit 2
+if [[ -n "$py" ]]; then
+  if ! command="$(printf '%s' "$input" | "$py" -c 'import json, sys; print(json.load(sys.stdin).get("tool_input", {}).get("command", ""))')"; then
+    echo "cuecal: unable to parse hook input; refusing tool call." >&2
+    exit 2
+  fi
+elif command -v jq >/dev/null 2>&1; then
+  if ! command="$(printf '%s' "$input" | jq -er '.tool_input.command')"; then
+    echo "cuecal: unable to parse hook input; refusing tool call." >&2
+    exit 2
+  fi
+else
+  # No Python or jq (stock Git Bash on Windows): pull tool_input.command out
+  # with sed. Refuse anything it can't decode reliably rather than allow it:
+  # a missing command, or \uXXXX escapes, which could spell `git commit`.
+  raw="$(printf '%s' "$input" | tr -d '\n' \
+    | sed -nE 's/.*"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p')"
+  if [[ -z "$raw" || "$raw" == *'\u'* ]]; then
+    echo "cuecal: unable to parse hook input without python or jq; refusing tool call." >&2
+    exit 2
+  fi
+  command="$(printf '%s' "$raw" \
+    | sed -e 's/\\n/\n/g' -e 's/\\t/\t/g' -e 's/\\r//g' -e 's/\\"/"/g' -e 's#\\/#/#g' -e 's/\\\\/\\/g')"
 fi
 
 # Only gate `git commit`, allowing git's -C <path> and -c <name=value> before it.
