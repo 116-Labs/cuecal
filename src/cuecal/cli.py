@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from . import __version__, db, lock, log, notify, paths, registry, secrets, service
+from . import __version__, db, dedupe, lock, log, notify, paths, registry, secrets, service
 from .config import Config, ConfigError, load_config, write_default_config
 from .models import MeetingCandidate
 from .sinks import fanout
@@ -50,6 +50,18 @@ def _sync_mirrors(conn: sqlite3.Connection, source: CalendarSource, *, dry_run: 
             print(f"dry-run: would {op.describe()}")
         else:
             logger.info("mirror: %s", op.describe())
+
+
+def _matches_sink_event(cand: MeetingCandidate, sink: Any | None) -> bool:
+    # A sink with find_match patches its own match in create; the marker tier is left to create.
+    if sink is None or hasattr(sink, "find_match"):
+        return False
+    # A sink that cannot be queried must not block the write: create reports its own errors.
+    try:
+        return dedupe.matches_nearby_event(cand, sink)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sink dedupe lookup failed for %r: %s", cand.title, exc)
+        return False
 
 
 def _queue_pending(
@@ -168,6 +180,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 sink_plugin = registry.get("sinks", cfg.sink)
             except KeyError:
                 logger.warning("sink %r not found; skipping sink writes", cfg.sink)
+            sink_inst = None
+            if sink_plugin is not None:
+                try:
+                    sink_inst = fanout.instantiate(sink_plugin)
+                except Exception as exc:  # noqa: BLE001 - deliver reports it per candidate
+                    logger.warning("sink %r could not be initialised: %s", cfg.sink, exc)
 
             secondaries = _secondary_sinks(cfg)
             notifiers = notify.build_notifiers(cfg)
@@ -262,7 +280,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
                         if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
                             logger.info(
-                                "skipped duplicate meeting %r from %s", cand.meeting_id, msg.source
+                                "skipped duplicate meeting %r from %s", cand.title, msg.source
                             )
                             continue
 
@@ -278,7 +296,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                         message_id = msg.id if hasattr(msg, "id") else ""
 
                         if is_valid and cand.confidence >= cfg.auto_create_threshold:
-                            if args.dry_run:
+                            if _matches_sink_event(cand, sink_inst):
+                                logger.info(
+                                    "skipped meeting %r from %s: matches a calendar event",
+                                    cand.title,
+                                    msg.source,
+                                )
+                            elif args.dry_run:
                                 logger.info("dry-run: would create event for %r", cand.title)
                             elif sink_plugin:
                                 try:

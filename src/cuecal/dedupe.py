@@ -8,6 +8,8 @@ from datetime import timedelta
 
 from .models import MeetingCandidate, Sink
 
+DEFAULT_DURATION = timedelta(minutes=30)
+
 
 def _similar_title(t1: str, t2: str) -> bool:
     if not t1 or not t2:
@@ -42,21 +44,26 @@ def is_duplicate(candidate: MeetingCandidate, sink: Sink, conn: sqlite3.Connecti
             # We can treat it as a duplicate. Backfilling the DB is handled elsewhere if needed.
             return True
 
-    # Tier 3: Fuzzy match: start time within ±15 min + similar title via Sink.busy
-    if candidate.start and candidate.end:
-        margin = timedelta(minutes=15)
-        # Search a wider window
-        start_window = candidate.start - margin
-        end_window = candidate.end + margin
-        
-        busy_events = sink.busy(start_window, end_window)
-        for ev in busy_events:
-            if ev.start:
-                diff = (ev.start - candidate.start).total_seconds()
-                if abs(diff) <= 900:  # 15 minutes
-                    if candidate.meeting_id and candidate.meeting_id in ev.conference_meeting_ids:
-                        return True
-                    if _similar_title(candidate.title, ev.title):
-                        return True
+    return matches_nearby_event(candidate, sink)
 
+
+def matches_nearby_event(candidate: MeetingCandidate, sink: Sink) -> bool:
+    """Tier 3: an event starting within ±15 min with a similar title or the same conference ID.
+
+    A candidate without an end time is searched with the sinks' 30-minute default duration.
+    An event carrying the candidate's own cuecalMeetingId is left to the sink's create.
+    """
+    if not candidate.start:
+        return False
+    margin = timedelta(minutes=15)
+    end = candidate.end or candidate.start + DEFAULT_DURATION
+    for ev in sink.busy(candidate.start - margin, end + margin):
+        if not ev.start or abs((ev.start - candidate.start).total_seconds()) > 900:
+            continue
+        if candidate.meeting_id and ev.meeting_id ==candidate.meeting_id:
+            continue
+        if candidate.meeting_id and candidate.meeting_id in ev.conference_meeting_ids:
+            return True
+        if _similar_title(candidate.title, ev.title):
+            return True
     return False

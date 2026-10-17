@@ -1357,3 +1357,243 @@ def test_doctor_checks_secondary_sink_tools(tmp_path, monkeypatch, capsys):
     )
 
 
+def _run_dedupe_pipeline(tmp_path, monkeypatch, candidate, sink):
+    from datetime import datetime
+
+    from cuecal.models import Message
+
+    assert cli.main(["init"]) == 0
+    message = Message(id="msg1", source="dummy", sender="a", ts=datetime.now(), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([message]) if kind == "sources" else sink,
+    )
+    monkeypatch.setattr("cuecal.extract.extract", lambda msg: candidate)
+    _set_dummy_source(tmp_path / "config.toml")
+    return cli.main(["run", "--once"])
+
+
+class _DedupeSink:
+    name = "google-calendar"
+
+    def __init__(self, existing=(), by_meeting_id=None):
+        self.existing = list(existing)
+        self.by_meeting_id = by_meeting_id
+        self.created = []
+
+    def find_by_meeting_id(self, meeting_id):
+        return self.by_meeting_id
+
+    def busy(self, start, end):
+        return self.existing
+
+    def create(self, candidate):
+        self.created.append(candidate)
+        return "evt_new"
+
+
+def _timed_candidate(**overrides):
+    from datetime import UTC, datetime
+
+    from cuecal.models import MeetingCandidate
+
+    fields = {
+        "confidence": 0.9,
+        "meeting_id": "mtg1",
+        "title": "Roadmap sync",
+        "start": datetime(2030, 1, 1, 15, 0, tzinfo=UTC),
+        "end": datetime(2030, 1, 1, 15, 30, tzinfo=UTC),
+    }
+    return MeetingCandidate(**{**fields, **overrides})
+
+
+def test_cli_run_skips_meeting_with_similar_title_starting_within_fifteen_minutes(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    existing = SinkEvent(
+        id="hand_made",
+        title="Roadmap sync with Sam",
+        start=datetime(2030, 1, 1, 15, 10, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 40, tzinfo=UTC),
+    )
+    sink = _DedupeSink(existing=[existing])
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert sink.created == []
+
+
+def test_cli_run_skips_meeting_matching_hand_made_event_conference_id(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    existing = SinkEvent(
+        id="hand_made",
+        title="Untitled",
+        start=datetime(2030, 1, 1, 15, 5, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 35, tzinfo=UTC),
+        conference_meeting_ids=("mtg1",),
+    )
+    sink = _DedupeSink(existing=[existing])
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert sink.created == []
+
+
+def test_cli_run_leaves_marked_event_a_week_away_to_the_sink_and_still_creates(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    marked = SinkEvent(
+        id="marked",
+        title="Other",
+        start=datetime(2029, 12, 25, 15, 0, tzinfo=UTC),
+        end=datetime(2029, 12, 25, 15, 30, tzinfo=UTC),
+        meeting_id="mtg1",
+    )
+    sink = _DedupeSink(by_meeting_id=marked)
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert [c.meeting_id for c in sink.created] == ["mtg1"]
+
+
+def test_cli_run_leaves_own_marked_event_at_same_time_to_the_sink_and_calls_create(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    own = SinkEvent(
+        id="own",
+        title="Roadmap sync",
+        start=datetime(2030, 1, 1, 15, 0, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 30, tzinfo=UTC),
+        meeting_id="mtg1",
+    )
+    sink = _DedupeSink(existing=[own], by_meeting_id=own)
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert [c.meeting_id for c in sink.created] == ["mtg1"]
+
+
+def test_cli_run_skips_endless_meeting_matching_hand_made_event_conference_id(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    existing = SinkEvent(
+        id="hand_made",
+        title="Untitled",
+        start=datetime(2030, 1, 1, 15, 5, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 35, tzinfo=UTC),
+        conference_meeting_ids=("mtg1",),
+    )
+    sink = _DedupeSink(existing=[existing])
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(end=None), sink)
+
+    assert sink.created == []
+
+
+def test_cli_run_queues_low_confidence_meeting_that_matches_a_calendar_event(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    existing = SinkEvent(
+        id="hand_made",
+        title="Roadmap sync with Sam",
+        start=datetime(2030, 1, 1, 15, 10, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 40, tzinfo=UTC),
+    )
+    sink = _DedupeSink(existing=[existing])
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(confidence=0.1), sink)
+
+    conn = db.connect(tmp_path / "state.db")
+    assert len(db.list_pending(conn)) == 1
+    assert sink.created == []
+
+
+def test_cli_run_leaves_matching_to_sink_that_matches_and_patches_in_create(
+    tmp_path, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    existing = SinkEvent(
+        id="hand_made",
+        title="Roadmap sync",
+        start=datetime(2030, 1, 1, 15, 0, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 30, tzinfo=UTC),
+    )
+
+    class MatchingSink(_DedupeSink):
+        def find_match(self, candidate):
+            return existing
+
+    sink = MatchingSink(existing=[existing])
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert [c.meeting_id for c in sink.created] == ["mtg1"]
+
+
+def test_cli_run_queues_meeting_when_sink_class_fails_to_initialise(tmp_path, monkeypatch):
+    class BrokenSink(_DedupeSink):
+        def __init__(self):
+            raise RuntimeError("no credentials")
+
+    assert _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), BrokenSink) == 1
+
+    conn = db.connect(tmp_path / "state.db")
+    assert len(db.list_pending(conn)) == 1
+
+
+def test_cli_run_creates_meeting_when_nearby_event_has_unrelated_title(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from cuecal.sinks.base import SinkEvent
+
+    other = SinkEvent(
+        id="other",
+        title="Dentist",
+        start=datetime(2030, 1, 1, 15, 10, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 15, 40, tzinfo=UTC),
+    )
+    sink = _DedupeSink(existing=[other])
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert [c.meeting_id for c in sink.created] == ["mtg1"]
+
+
+def test_cli_run_still_creates_meeting_when_sink_dedupe_lookup_fails(tmp_path, monkeypatch):
+    class BrokenLookupSink(_DedupeSink):
+        def busy(self, start, end):
+            raise ConnectionError("calendar unreachable")
+
+    sink = BrokenLookupSink()
+
+    _run_dedupe_pipeline(tmp_path, monkeypatch, _timed_candidate(), sink)
+
+    assert [c.meeting_id for c in sink.created] == ["mtg1"]
+
+
