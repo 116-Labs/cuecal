@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -247,8 +248,8 @@ def test_create_idempotent_updates_existing(sample_candidate):
     existing_event = {
         "id": "existing_event_55",
         "summary": "Old Title",
-        "start": {"dateTime": "2026-10-15T16:00:00Z"},
-        "end": {"dateTime": "2026-10-15T17:00:00Z"},
+        "start": {"dateTime": "2026-10-15T17:10:00Z"},
+        "end": {"dateTime": "2026-10-15T18:10:00Z"},
         "extendedProperties": {"private": {"cuecalMeetingId": sample_candidate.meeting_id}},
     }
     updated_event = {
@@ -278,6 +279,85 @@ def test_create_idempotent_updates_existing(sample_candidate):
     assert client.calls[0][0] == "GET"
     assert client.calls[1][0] == "PATCH"
     assert client.calls[1][1] == "/calendars/primary/events/existing_event_55"
+
+
+def _event_at(start: str, end: str, meeting_id: str, event_id: str = "earlier_1") -> dict[str, Any]:
+    return {
+        "id": event_id,
+        "summary": "Old Title",
+        "start": {"dateTime": start},
+        "end": {"dateTime": end},
+        "extendedProperties": {"private": {"cuecalMeetingId": meeting_id}},
+    }
+
+
+def _create_with_existing(candidate, existing):
+    created = {**existing, "id": "new_event_1"}
+    client = MockHttpClient(
+        {
+            "GET /calendars/primary/events": {"items": [existing]},
+            "POST /calendars/primary/events": created,
+            "PATCH /calendars/primary/events/": existing,
+        }
+    )
+    sink = GoogleCalendarSink(token_provider="dummy", http_client=client)
+    return sink.create(candidate), client
+
+
+def test_create_later_recurring_instance_makes_new_event_and_leaves_earlier_untouched(
+    sample_candidate,
+):
+    earlier = _event_at("2026-10-08T17:00:00Z", "2026-10-08T18:00:00Z", "abc-defg-hij")
+    event, client = _create_with_existing(sample_candidate, earlier)
+
+    assert event.id == "new_event_1"
+    assert [call[0] for call in client.calls] == ["GET", "POST"]
+
+
+def test_create_rescheduled_one_off_beyond_window_makes_second_event_until_reschedule_sync_12(
+    sample_candidate,
+):
+    original = _event_at("2026-10-15T15:00:00Z", "2026-10-15T16:00:00Z", "abc-defg-hij")
+    event, client = _create_with_existing(sample_candidate, original)
+
+    assert event.id == "new_event_1"
+    assert [call[0] for call in client.calls] == ["GET", "POST"]
+
+
+def test_create_start_exactly_at_window_edge_updates_existing_without_duplicate(
+    sample_candidate,
+):
+    edge = _event_at("2026-10-15T17:15:00Z", "2026-10-15T18:15:00Z", "abc-defg-hij")
+    event, client = _create_with_existing(sample_candidate, edge)
+
+    assert event.id == "earlier_1"
+    assert [call[0] for call in client.calls] == ["GET", "PATCH"]
+
+
+def test_create_naive_candidate_start_is_compared_in_its_own_time_zone(sample_candidate):
+    candidate = replace(
+        sample_candidate,
+        start=datetime(2026, 10, 15, 13, 0),
+        end=datetime(2026, 10, 15, 14, 0),
+        tz="America/New_York",
+    )
+    same_instant = _event_at(
+        "2026-10-15T13:00:00-04:00", "2026-10-15T14:00:00-04:00", "abc-defg-hij"
+    )
+    event, client = _create_with_existing(candidate, same_instant)
+
+    assert event.id == "earlier_1"
+    assert [call[0] for call in client.calls] == ["GET", "PATCH"]
+
+
+def test_events_by_meeting_id_follows_every_result_page():
+    pages = {None: {"items": [{"id": "a"}], "nextPageToken": "t2"}, "t2": {"items": [{"id": "b"}]}}
+    client = MockHttpClient(
+        {"GET /calendars/primary/events": lambda params, _json: pages[params.get("pageToken")]}
+    )
+    sink = GoogleCalendarSink(token_provider="dummy", http_client=client)
+
+    assert [i["id"] for i in sink.events_by_meeting_id("abc-defg-hij")] == ["a", "b"]
 
 
 def test_update_event(sample_candidate):
