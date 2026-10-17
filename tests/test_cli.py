@@ -1357,3 +1357,162 @@ def test_doctor_checks_secondary_sink_tools(tmp_path, monkeypatch, capsys):
     )
 
 
+def test_cli_run_linkless_invites_land_in_pending_queue(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from cuecal import db
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+
+    class DummySource:
+        name = "dummy"
+
+        def fetch_since(self, cursor):
+            msg = Message(
+                id="msg_linkless",
+                source="dummy",
+                sender="Alice Smith <alice@example.com>",
+                ts=datetime.now(UTC),
+                text="In-person standup tomorrow at 10am in Room 4B",
+            )
+            return [msg], "next_cursor"
+
+    created_events = []
+
+    class DummySink:
+        name = "dummy-sink"
+
+        def create(self, candidate):
+            created_events.append(candidate)
+            return f"evt_{candidate.meeting_id}"
+
+    def fake_registry_get(kind, name):
+        if kind == "sources":
+            return DummySource
+        if kind == "sinks":
+            return DummySink()
+        raise KeyError(name)
+
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda msg: MeetingCandidate(
+            confidence=0.95,
+            title="Team Standup",
+            start=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+            end=datetime(2026, 10, 5, 11, 0, tzinfo=UTC),
+            join_url=None,
+            meeting_id=None,
+        ),
+    )
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(config_path.read_text().replace("sources = []", 'sources = ["dummy"]'))
+
+    assert cli.main(["run", "--once"]) == 0
+
+    assert len(created_events) == 0
+    conn = db.connect(tmp_path / "state.db")
+    pending_items = db.list_pending(conn)
+    assert len(pending_items) == 1
+    p = pending_items[0]
+    assert p["message_id"] == "msg_linkless"
+    assert p["reason"] == "linkless invite"
+    cand_loaded = MeetingCandidate.from_json(p["candidate_json"])
+    assert cand_loaded.title == "Team Standup"
+    assert cand_loaded.meeting_id is not None
+    conn.close()
+
+
+def test_cli_run_same_linkless_invite_two_sources_yields_one_pending_item(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from cuecal import db
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+
+    notified = []
+    monkeypatch.setattr(
+        "cuecal.notify.DesktopNotifier.send",
+        lambda self, notification: notified.append(notification),
+    )
+
+    class GmailSource:
+        name = "gmail"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_since(self, cursor):
+            msg = Message(
+                id="gmail_101",
+                source="gmail",
+                sender="Alice Smith <alice@example.com>",
+                ts=datetime.now(UTC),
+                text="In-person standup tomorrow at 10am in Room 4B",
+            )
+            return [msg], "cursor_gmail"
+
+    class SlackSource:
+        name = "slack"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_since(self, cursor):
+            msg = Message(
+                id="slack_202",
+                source="slack",
+                sender="alice@example.com",
+                ts=datetime.now(UTC),
+                text="Re: In-person standup tomorrow at 10am in Room 4B",
+            )
+            return [msg], "cursor_slack"
+
+    sources = {"gmail": GmailSource, "slack": SlackSource}
+
+    class DummySink:
+        name = "dummy-sink"
+
+        def create(self, candidate):
+            return "evt_1"
+
+    def fake_registry_get(kind, name):
+        if kind == "sources" and name in sources:
+            return sources[name]
+        if kind == "sinks":
+            return DummySink()
+        raise KeyError(name)
+
+    monkeypatch.setattr("cuecal.cli.registry.get", fake_registry_get)
+
+    def fake_extract(msg):
+        title = "In-person standup" if msg.source == "gmail" else "Re: In-person standup"
+        return MeetingCandidate(
+            confidence=0.9,
+            title=title,
+            start=datetime(2026, 10, 5, 10, 0, 15, tzinfo=UTC),
+            end=datetime(2026, 10, 5, 11, 0, tzinfo=UTC),
+            join_url=None,
+            meeting_id=None,
+        )
+
+    monkeypatch.setattr("cuecal.extract.extract", fake_extract)
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text().replace("sources = []", 'sources = ["gmail", "slack"]')
+    )
+
+    assert cli.main(["run", "--once"]) == 0
+
+    conn = db.connect(tmp_path / "state.db")
+    pending_items = db.list_pending(conn)
+    assert len(pending_items) == 1
+    assert len(notified) == 1
+    conn.close()
+
+
+

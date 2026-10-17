@@ -1,9 +1,16 @@
 import sqlite3
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from cuecal.dedupe import is_duplicate
+from cuecal.dedupe import (
+    is_duplicate,
+    linkless_dedupe_key,
+    normalize_organizer,
+    normalize_start,
+    normalize_title,
+)
 from cuecal.models import MeetingCandidate, SinkEvent
 from cuecal.sinks.google import GoogleCalendarSink
 
@@ -251,3 +258,96 @@ def test_identical_meeting_distinct_sources():
 
     is_dup_2 = is_duplicate(email_candidate, sink, conn)
     assert is_dup_2 is True
+
+
+def test_normalize_organizer_display_name_and_bare_email():
+    assert normalize_organizer("John Doe <john@example.com>") == "john@example.com"
+    assert normalize_organizer("<john@example.com>") == "john@example.com"
+    assert normalize_organizer("john@example.com") == "john@example.com"
+    assert normalize_organizer('"Doe, John" <john@example.com>') == "john@example.com"
+    assert normalize_organizer("mailto:john@example.com") == "john@example.com"
+    assert normalize_organizer(None) == ""
+    assert normalize_organizer("") == ""
+
+
+def test_normalize_organizer_case_and_whitespace():
+    assert normalize_organizer("   JOHN.DOE@EXAMPLE.COM   ") == "john.doe@example.com"
+    assert normalize_organizer("John <  JOHN.DOE@EXAMPLE.COM  >") == "john.doe@example.com"
+
+
+def test_normalize_title_re_fwd_prefixes_repeated_mixed_case():
+    assert normalize_title("Re: Project Kickoff") == "project kickoff"
+    assert normalize_title("RE: Fwd: re: FWD: Project Kickoff") == "project kickoff"
+    assert normalize_title("Fw: Project Kickoff") == "project kickoff"
+    assert normalize_title("Re[2]: Project Kickoff") == "project kickoff"
+    assert normalize_title("re(3): Project Kickoff") == "project kickoff"
+    assert normalize_title("Re:") == ""
+    assert normalize_title(None) == ""
+
+
+def test_normalize_title_whitespace_and_case():
+    assert normalize_title("   Project    Kickoff   Sync   ") == "project kickoff sync"
+    assert normalize_title("PROJECT KICKOFF") == "project kickoff"
+    assert normalize_title("Re:   Project   Kickoff  ") == "project kickoff"
+
+
+def test_normalize_start_rounds_to_minute_in_utc():
+    t = datetime(2026, 10, 5, 14, 30, 45, tzinfo=UTC)
+    assert normalize_start(t) == "2026-10-05T14:30:00Z"
+    t_naive = datetime(2026, 10, 5, 14, 30, 12)
+    assert normalize_start(t_naive) == "2026-10-05T14:30:00Z"
+    assert normalize_start(None) is None
+
+
+def test_linkless_dedupe_key_normalization_case_differences():
+    t = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    k1 = linkless_dedupe_key(t, "Alice@Example.com", "Project Sync")
+    k2 = linkless_dedupe_key(t, "alice@example.com", "project sync")
+    assert k1 == k2
+
+
+def test_linkless_dedupe_key_normalization_whitespace():
+    t = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    k1 = linkless_dedupe_key(t, "  alice@example.com  ", "  Project   Sync  ")
+    k2 = linkless_dedupe_key(t, "alice@example.com", "Project Sync")
+    assert k1 == k2
+
+
+def test_linkless_dedupe_key_normalization_re_fwd_prefixes():
+    t = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    k1 = linkless_dedupe_key(t, "alice@example.com", "Re: Fwd: RE: fwd: Project Sync")
+    k2 = linkless_dedupe_key(t, "alice@example.com", "Project Sync")
+    assert k1 == k2
+
+
+def test_linkless_dedupe_key_normalization_display_name_vs_bare_email():
+    t = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    k1 = linkless_dedupe_key(t, "Alice Smith <alice@example.com>", "Project Sync")
+    k2 = linkless_dedupe_key(t, "alice@example.com", "Project Sync")
+    assert k1 == k2
+
+
+def test_linkless_dedupe_key_start_differing_only_by_seconds():
+    t1 = datetime(2026, 10, 5, 10, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 10, 5, 10, 0, 45, tzinfo=UTC)
+    k1 = linkless_dedupe_key(t1, "alice@example.com", "Project Sync")
+    k2 = linkless_dedupe_key(t2, "alice@example.com", "Project Sync")
+    assert k1 == k2
+
+
+def test_linkless_dedupe_key_start_different_timezones_same_instant():
+    t_utc = datetime(2026, 10, 5, 14, 0, 0, tzinfo=UTC)
+    t_ny = datetime(2026, 10, 5, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    t_la = datetime(2026, 10, 5, 7, 0, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+    k_utc = linkless_dedupe_key(t_utc, "alice@example.com", "Sync")
+    k_ny = linkless_dedupe_key(t_ny, "alice@example.com", "Sync")
+    k_la = linkless_dedupe_key(t_la, "alice@example.com", "Sync")
+    assert k_utc == k_ny == k_la
+
+
+def test_linkless_dedupe_key_missing_start_falls_back_to_message_id():
+    key = linkless_dedupe_key(
+        None, "alice@example.com", "Project Sync", source="slack", message_id="msg_999"
+    )
+    assert key == "slack:msg_999"
+

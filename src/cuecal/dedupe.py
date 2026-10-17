@@ -3,10 +3,86 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import re
 import sqlite3
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parseaddr
 
 from .models import MeetingCandidate, Sink
+
+_RE_FWD_PREFIX = re.compile(r"^(?:\s*(?:re|fwd?)(?:\[\d+\]|\(\d+\))?:\s*)+", re.IGNORECASE)
+
+
+def normalize_organizer(organizer: str | None) -> str:
+    """Normalize organizer to a bare, casefolded email address."""
+    if not organizer:
+        return ""
+    text = organizer.strip()
+    if text.lower().startswith("mailto:"):
+        text = text[7:].strip()
+    _, addr = parseaddr(text)
+    email = addr if addr else text
+    email = email.strip("<>\"' \t\r\n")
+    return email.casefold()
+
+
+def normalize_title(title: str | None) -> str:
+    """Normalize title by removing leading Re:/Fwd: prefixes and collapsing whitespace."""
+    if not title:
+        return ""
+    text = title.strip()
+    while True:
+        m = _RE_FWD_PREFIX.match(text)
+        if not m:
+            break
+        text = text[m.end():].strip()
+    return " ".join(text.split()).casefold()
+
+
+def normalize_start(start: datetime | None) -> str | None:
+    """Normalize start time rounded to the minute in UTC."""
+    if start is None:
+        return None
+    if start.tzinfo is None:
+        start_utc = start.replace(tzinfo=UTC)
+    else:
+        start_utc = start.astimezone(UTC)
+    start_utc = start_utc.replace(second=0, microsecond=0)
+    return start_utc.strftime("%Y-%m-%dT%H:%M:00Z")
+
+
+def linkless_dedupe_key(
+    start: datetime | MeetingCandidate | None = None,
+    organizer: str | None = None,
+    title: str | None = None,
+    *,
+    source: str = "",
+    message_id: str = "",
+) -> str:
+    """Compute stable dedupe key for linkless invites or fall back to message-ID key."""
+    if isinstance(start, MeetingCandidate):
+        cand = start
+        start = cand.start
+        title = title if title is not None else cand.title
+        if organizer is None and cand.attendees:
+            organizer = cand.attendees[0]
+
+    if start is None:
+        if source and message_id:
+            return f"{source}:{message_id}"
+        return message_id or source or ""
+
+    norm_start = normalize_start(start)
+    norm_organizer = normalize_organizer(organizer)
+    norm_title = normalize_title(title)
+    payload = f"{norm_start}|{norm_organizer}|{norm_title}".encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+compute_dedupe_key = linkless_dedupe_key
+linkless_key = linkless_dedupe_key
+
 
 
 def _similar_title(t1: str, t2: str) -> bool:
