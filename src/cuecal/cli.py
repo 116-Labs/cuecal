@@ -106,10 +106,17 @@ def _queue_pending(
     snippet: str,
     source: str,
     message_id: str,
+    dedupe_by_meeting_id: bool = False,
 ) -> None:
     """Queue and notify once for a message, even if it is replayed on a later pass."""
     source = source or cand.source_ref or ""
-    existing = db.find_pending_by_message(conn, source=source, message_id=message_id)
+    existing = None
+    if dedupe_by_meeting_id and cand.meeting_id:
+        existing = db.find_pending_by_meeting_id(conn, cand.meeting_id)
+    if dedupe_by_meeting_id and existing is None and cand.dedupe_key:
+        existing = db.find_pending_by_dedupe_key(conn, cand.dedupe_key)
+    if existing is None:
+        existing = db.find_pending_by_message(conn, source=source, message_id=message_id)
     if existing is not None:
         logger.info(
             "candidate %r already queued (id: %d, status: %s); not queued again",
@@ -164,6 +171,7 @@ def _sync_secondaries(
             snippet=failure.payload[:200],
             source=f"sink:{failure.sink}",
             message_id=failure.sink_event_id,
+            dedupe_by_meeting_id=False,
         )
 
 
@@ -315,6 +323,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 db.mark_seen(conn, msg.source, msg.id)
                             continue
 
+                        is_linkless = False
+                        if not cand.meeting_id:
+                            is_linkless = True
+                            cand.dedupe_key = dedupe.linkless_dedupe_key(
+                                start=cand.start,
+                                organizer=cand.organizer or getattr(msg, "sender", None),
+                                title=cand.title,
+                                source=getattr(msg, "source", ""),
+                                message_id=getattr(msg, "id", ""),
+                            )
+
                         if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
                             logger.info(
                                 "skipped duplicate meeting %r from %s", cand.title, msg.source
@@ -334,7 +353,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                         source_name = msg.source if hasattr(msg, "source") else ""
                         message_id = msg.id if hasattr(msg, "id") else ""
 
-                        if is_valid and cand.confidence >= cfg.auto_create_threshold:
+                        if (
+                            is_valid
+                            and not is_linkless
+                            and cand.confidence >= cfg.auto_create_threshold
+                        ):
                             if _matches_sink_event(cand, sink_inst):
                                 logger.info(
                                     "skipped meeting %r from %s: matches a calendar event",
@@ -375,20 +398,22 @@ def cmd_run(args: argparse.Namespace) -> int:
                                         snippet=snippet,
                                         source=source_name,
                                         message_id=message_id,
+                                        dedupe_by_meeting_id=True,
                                     )
                                 else:
                                     logger.info("created event %r", event_id)
                                     _provision_conference(cfg, sink_plugin, event_id)
                                 db.mark_seen(conn, msg.source, msg.id)
                         else:
-                            reason = (
-                                val_reason
-                                if not is_valid
-                                else (
+                            if not is_valid:
+                                reason = val_reason
+                            elif is_linkless:
+                                reason = "linkless invite"
+                            else:
+                                reason = (
                                     f"low confidence ({cand.confidence:.2f} < "
                                     f"{cfg.auto_create_threshold:.2f})"
                                 )
-                            )
                             if args.dry_run:
                                 logger.info(
                                     "dry-run: would add candidate %r to pending queue (%s)",
@@ -404,6 +429,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                                     snippet=snippet,
                                     source=source_name,
                                     message_id=message_id,
+                                    dedupe_by_meeting_id=True,
                                 )
                                 db.mark_seen(conn, msg.source, msg.id)
 
@@ -512,6 +538,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
             primary=sink_inst,
             secondaries=_secondary_sinks(cfg),
         )
+        _provision_conference(cfg, sink_plugin, event_id)
 
         db.approve_pending(conn, args.id)
         print(f"approved #{args.id}: created event {event_id} ({cand.title})")
@@ -651,6 +678,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
                 primary=sink_inst,
                 secondaries=_secondary_sinks(cfg),
             )
+            _provision_conference(cfg, sink_plugin, event_id)
 
             db.approve_pending(conn, args.id)
             print(f"approved #{args.id}: created event {event_id} ({cand.title})")

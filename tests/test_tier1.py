@@ -25,6 +25,7 @@ def test_ics_utc_high_confidence_and_method():
     assert c.title == "Design sync"
     assert c.meeting_id == "81234567890"
     assert c.attendees == ["bob@example.com"]
+    assert c.organizer is None
     assert tier1.parse_ics(ics("DTSTART:20261003T210000Z")).method == "REQUEST"
 
 
@@ -137,3 +138,10 @@ def test_resolve_tz():
     assert tier1.resolve_tz("Eastern Time (US and Canada)") == "America/New_York"
     assert tier1.resolve_tz("Europe/London") == "Europe/London"
     assert tier1.resolve_tz("IST") is None
+
+
+def test_ics_organizer_is_bare_email():
+    c = tier1.parse_ics(
+        ics("DTSTART:20261003T210000Z", extra="ORGANIZER;CN=Alice:mailto:alice@example.com\r\n")
+    )
+    assert c.organizer == "alice@example.com"

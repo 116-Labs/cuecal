@@ -161,6 +161,11 @@ def parse_ics(text: str, source_ref: str | None = None) -> MeetingCandidate | No
                 str(a).removeprefix("mailto:").removeprefix("MAILTO:")
                 for a in _as_list(ev.get("ATTENDEE"))
             ],
+            organizer=(
+                str(ev["ORGANIZER"]).removeprefix("mailto:").removeprefix("MAILTO:")
+                if "ORGANIZER" in ev
+                else None
+            ),
             source_ref=source_ref,
             confidence=HIGH if confident else LOW,
             tier="ics",
