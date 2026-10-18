@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -158,7 +158,9 @@ def validate_fixture_dict(data: Any) -> list[str]:
     # Label validation
     label = data.get("label")
     if label is not None:
-        if label not in VALID_LABELS:
+        if not isinstance(label, str):
+            errors.append("Field 'label' must be a string")
+        elif label not in VALID_LABELS:
             valid_lbls = sorted(VALID_LABELS)
             errors.append(f"Invalid top-level label '{label}'. Must be one of: {valid_lbls}")
 
@@ -213,6 +215,8 @@ def validate_fixture_dict(data: Any) -> list[str]:
         else:
             if "label" not in exp:
                 errors.append("Field 'expected.label' is required")
+            elif not isinstance(exp["label"], str):
+                errors.append("Field 'expected.label' must be a string")
             elif exp["label"] not in VALID_LABELS:
                 valid_lbls = sorted(VALID_LABELS)
                 errors.append(
@@ -229,6 +233,10 @@ def validate_fixture_dict(data: Any) -> list[str]:
                 if not isinstance(candidate, dict):
                     errors.append("Field 'expected.candidate' must be a dictionary or null")
                 else:
+                    known = {f.name for f in fields(ExpectedCandidate)}
+                    for key in sorted(set(candidate) - known):
+                        errors.append(f"Unknown field 'expected.candidate.{key}'")
+
                     str_fields = (
                         "title",
                         "start",
@@ -277,7 +285,12 @@ def load_fixture(path: Path | str) -> EvalFixture:
         raise FileNotFoundError(f"Fixture file not found: {file_path}")
 
     with file_path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise FixtureValidationError(f"{file_path}: invalid JSON: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise FixtureValidationError(f"{file_path}: not valid UTF-8: {exc}") from exc
 
     return EvalFixture.from_dict(data)
 

@@ -892,6 +892,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    from cuecal.eval import FixtureValidationError, load_fixtures, runner
+
+    try:
+        runner.require_built_tier(args.tier)
+        fixtures = load_fixtures(args.fixtures)
+    except (runner.TierNotBuiltError, NotADirectoryError, FixtureValidationError) as exc:
+        print(f"eval: {exc}", file=sys.stderr)
+        return 1
+    if not fixtures:
+        print(f"eval: no fixtures found under {args.fixtures}", file=sys.stderr)
+        return 1
+    try:
+        report = runner.evaluate(fixtures, tier=args.tier, provider=args.provider, model=args.model)
+    except runner.TierNotBuiltError as exc:
+        print(f"eval: {exc}", file=sys.stderr)
+        return 1
+    render = runner.render_markdown if args.format == "markdown" else runner.render_table
+    print(render(report))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cuecal", description="Meeting invites to calendar events."
@@ -978,6 +1000,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("service", parents=[common], help="manage the background service")
     p.add_argument("action", choices=["install", "uninstall", "status"])
     p.set_defaults(func=cmd_service)
+
+    p = sub.add_parser("eval", parents=[common], help="benchmark extraction against fixtures")
+    p.add_argument("--tier", type=int, choices=[1, 2, 3], default=1, help="extraction tier")
+    p.add_argument("--provider", help="LLM provider (tiers 2-3)")
+    p.add_argument("--model", help="LLM model (tiers 2-3)")
+    p.add_argument("--fixtures", default="tests/fixtures/eval", help="fixture directory")
+    p.add_argument("--format", choices=["table", "markdown"], default="table")
+    p.set_defaults(func=cmd_eval)
 
     p = sub.add_parser("doctor", parents=[common], help="report config, DB, keyring and plugins")
     p.set_defaults(func=cmd_doctor)
