@@ -131,6 +131,26 @@ def test_synced_secondary_not_written_again(conn):
     assert after == before
 
 
+def test_second_primary_event_for_one_meeting_id_stays_unlinked_and_unmirrored_until_12(conn):
+    class SecondInstancePrimary(RecordingSink):
+        def create(self, c):
+            event = super().create(c)
+            return SinkEvent(
+                id="google-calendar-evt-2", title=c.title, start=event.start, end=event.end
+            )
+
+    calls = []
+    kwargs = {
+        "primary_name": "google-calendar",
+        "secondaries": {"zoho": RecordingSink("zoho", calls)},
+    }
+    fanout.deliver(conn, _cand(), primary=RecordingSink("google-calendar", calls), **kwargs)
+    fanout.deliver(conn, _cand(), primary=SecondInstancePrimary("google-calendar", calls), **kwargs)
+
+    assert db.get_event_link(conn, "mtg1", "google-calendar") == "google-calendar-evt"
+    assert calls.count(("zoho", "create", "mtg1")) == 1
+
+
 def test_failed_secondary_written_again_on_next_delivery(conn):
     calls = []
     fanout.deliver(
