@@ -2,7 +2,7 @@
 
 Local-first agent that finds meeting invites buried in chat and email (Gmail, Slack, Zoho, any MCP source) and puts them on your calendar. Deterministic parsing does most of the work; an optional small local model and, only on escalation, a paid LLM fill in what parsing can't.
 
-> **Status: pre-alpha (v0.1.1).** `cuecal run` works end to end with the deterministic extractor (Tiers 0–1): the Gmail, Slack and Zoho (MCP) sources, the Google Calendar sink, the pending queue and the background service have landed. The LLM tiers (2–3) are built and off until configured; the Tier 2 model choice is still open ([#121](https://github.com/116-Labs/cuecal/issues/121)). The interactive Google sign-in is not built yet. See [Status](#status).
+> **Status: pre-alpha (v0.1.1).** `cuecal run` works end to end with the deterministic extractor (Tiers 0–1): the Gmail, Slack and Zoho (MCP) sources, the Google Calendar sink, the pending queue and the background service have landed. The LLM tiers (2–3) are built and off until configured; the Tier 2 model choice is still open ([#121](https://github.com/116-Labs/cuecal/issues/121)). `cuecal auth google` signs in to Google Calendar; Gmail sign-in is not built yet. See [Status](#status).
 
 ## Why
 
@@ -45,7 +45,7 @@ Nothing is tied to one person's setup: accounts, calendars, sources, models and 
 | Gmail, Slack and generic MCP (Zoho Mail/Cliq) sources; broadened fetch and the near-miss CLI (`misses`, `missed`) | Done ([#3](https://github.com/116-Labs/cuecal/issues/3), [#4](https://github.com/116-Labs/cuecal/issues/4), [#5](https://github.com/116-Labs/cuecal/issues/5), [#46](https://github.com/116-Labs/cuecal/issues/46)) |
 | `cuecal run` pipeline: source → extract → dedupe → route → sink | Done ([#48](https://github.com/116-Labs/cuecal/issues/48)) |
 | Google Calendar sink | Done ([#50](https://github.com/116-Labs/cuecal/issues/50)); open bug: a meeting-ID update can move an earlier recurring instance's event ([#65](https://github.com/116-Labs/cuecal/issues/65)) |
-| Google sign-in and calendar picker (`cuecal auth google`) | Not built; the command is a stub ([#51](https://github.com/116-Labs/cuecal/issues/51)) |
+| Google sign-in and calendar picker (`cuecal auth google`) | Built, Calendar scopes only; real sign-in on Windows and macOS unverified ([#51](https://github.com/116-Labs/cuecal/issues/51)). Until Gmail sign-in lands, the Gmail source reports "Gmail not authorized" |
 | Pending queue (`pending`, `approve`, `reject`, `edit`) | Done ([#40](https://github.com/116-Labs/cuecal/issues/40)) |
 | Pending notifications (desktop, ntfy) | Done ([#41](https://github.com/116-Labs/cuecal/issues/41)); desktop notifications are macOS only, so on Windows and Linux only ntfy delivers |
 | Dedupe | Done: meeting-ID matching and start-time/title and hand-made-event matching run in `cuecal run`; the sinks match by `cuecalMeetingId` marker or start time and title when they create ([#39](https://github.com/116-Labs/cuecal/issues/39), [#124](https://github.com/116-Labs/cuecal/issues/124)) |
@@ -108,7 +108,26 @@ uv run cuecal init
 uv run cuecal doctor
 ```
 
-Working today: `init`, `doctor`, `auth slack`, `run [--once]`, `pending`, `approve`, `reject`, `edit`, `misses`, `missed`, `mirror calendars|prune`, `service install|uninstall|status`, `eval --tier 1|2|3`. Stub until its issue lands: `auth google` (#51). Every command accepts `--dry-run` and `-v/--verbose`; `--dry-run` suppresses side effects only in commands that implement it.
+Working today: `init`, `doctor`, `auth slack`, `auth google`, `run [--once]`, `pending`, `approve`, `reject`, `edit`, `misses`, `missed`, `mirror calendars|prune`, `service install|uninstall|status`, `eval --tier 1|2|3`. Every command accepts `--dry-run` and `-v/--verbose`; `--dry-run` suppresses side effects only in commands that implement it.
+
+### Google sign-in
+
+CueCal signs in to Google with your own OAuth client, so you create one once:
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a project and enable the **Google Calendar API**.
+2. Configure the **OAuth consent screen**. With a Google Workspace organization, choose user type **Internal**. Otherwise choose **External** and set the publishing status to **In production**: the app may stay unverified, but in **Testing** mode Google expires refresh tokens after 7 days.
+3. Create an **OAuth client ID** of type **Desktop app** and download its JSON. Keep it outside the repository.
+4. Run, on the machine itself and in a desktop session:
+
+   ```sh
+   cuecal auth google --client-json <file>
+   ```
+
+Your browser opens on Google's sign-in page; CueCal asks only for `calendar.events` and `calendar.calendarlist.readonly`. Google returns to a one-off listener on `127.0.0.1`, so the browser must run on the same machine: there is no paste-the-URL or remote-host path, and the command fails when no browser can be opened. On Windows, run it in an interactive desktop session, not over SSH: Credential Manager is not readable from SSH sessions.
+
+The credentials, including the OAuth client ID and secret, go into the OS keyring as entry `google` (or the name under `[secrets] google`). CueCal refreshes the access token itself. If Google refuses a refresh (revoked access, or a Testing-mode token past 7 days), commands stop with a message to run `cuecal auth google` again; without `--client-json` it reuses the stored client.
+
+Next, CueCal lists the calendars you can write to and asks you to pick one by number (`--calendar ID` skips the question). The choice is written as `[mirror] target_calendar` in `config.toml`, leaving the rest of the file untouched. The Google Calendar sink creates events there, dedupe searches it, and calendar mirroring writes there too; unset, it is `primary`. The target cannot also be one of `mirror.source_calendars`.
 
 ### Background service
 

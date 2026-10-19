@@ -1,3 +1,5 @@
+import tomllib
+
 import pytest
 
 from cuecal.config import (
@@ -5,8 +7,56 @@ from cuecal.config import (
     ConfigError,
     load_config,
     parse_config,
+    set_target_calendar,
     write_default_config,
 )
+
+TEAM = "team@group.calendar.google.com"
+
+
+def _target(text: str) -> str:
+    return parse_config(tomllib.loads(text)).mirror.target_calendar
+
+
+def test_set_target_calendar_replaces_only_the_key_line():
+    text = (
+        "# my cuecal setup\n"
+        'sources = ["calendar"]  # keep\n'
+        "\n"
+        "[mirror]\n"
+        "# which calendar gets events\n"
+        'target_calendar = "primary"\n'
+        'source_calendars = ["work@group.calendar.google.com"]\n'
+        "\n"
+        "[notify]\n"
+        "desktop = false\n"
+    )
+    edited = set_target_calendar(text, TEAM)
+    assert edited == text.replace('target_calendar = "primary"', f'target_calendar = "{TEAM}"')
+    assert _target(edited) == TEAM
+
+
+def test_set_target_calendar_adds_key_to_existing_mirror_table():
+    text = '[mirror]\nlookahead_days = 7\n\n[notify]\ndesktop = false\n'
+    edited = set_target_calendar(text, TEAM)
+    assert edited == (
+        f'[mirror]\ntarget_calendar = "{TEAM}"\nlookahead_days = 7\n\n[notify]\ndesktop = false\n'
+    )
+    assert _target(edited) == TEAM
+
+
+@pytest.mark.parametrize("text", ["sources = []\n# trailing comment", "", DEFAULT_CONFIG_TOML])
+def test_set_target_calendar_creates_mirror_table_when_absent(text):
+    edited = set_target_calendar(text, TEAM)
+    assert edited.startswith(text)
+    assert edited.endswith(f'[mirror]\ntarget_calendar = "{TEAM}"\n')
+    assert _target(edited) == TEAM
+
+
+def test_set_target_calendar_rejects_a_target_that_is_a_mirror_source():
+    text = f'[mirror]\nsource_calendars = ["{TEAM}"]\n'
+    with pytest.raises(ConfigError, match="must not include the target calendar"):
+        set_target_calendar(text, TEAM)
 
 
 def test_default_config_loads(tmp_path):
@@ -319,30 +369,24 @@ def test_mirror_rejects_target_as_source(mirror):
 @pytest.mark.parametrize(
     "data",
     [
+        {"mirror": {"target_calendar": "primary"}},
+        {"mirror": {"target_calendar": "Me@Example.com", "self_email": "me@example.com"}},
         {"mirror": {"target_calendar": "team@group"}},
-        {"mirror": {"target_calendar": "me@example.com"}},
+        {"sink": "google-calendar", "mirror": {"target_calendar": "me@example.com"}},
         {
             "sink": "other",
             "secondary_sinks": ["google-calendar"],
             "mirror": {"target_calendar": "x"},
         },
-    ],
-)
-def test_mirror_target_must_match_google_sink_calendar(data):
-    with pytest.raises(ConfigError, match="must be the primary calendar"):
-        parse_config(data)
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        {"mirror": {"target_calendar": "primary"}},
-        {"mirror": {"target_calendar": "Me@Example.com", "self_email": "me@example.com"}},
         {"sink": "other", "mirror": {"target_calendar": "team@group"}},
     ],
 )
-def test_mirror_target_accepts_the_google_sink_calendar(data):
+def test_mirror_target_accepts_a_picked_calendar_with_the_google_sink(data):
     assert parse_config(data).mirror.target_calendar == data["mirror"]["target_calendar"]
+
+
+def test_mirror_target_defaults_to_primary_when_unset():
+    assert parse_config({"sink": "google-calendar"}).mirror.target_calendar == "primary"
 
 
 @pytest.mark.parametrize(

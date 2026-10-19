@@ -15,14 +15,12 @@ import pytest
 from cuecal import cli, db, registry
 from cuecal.conference import plan_conference
 from cuecal.config import ConferenceConfig, MirrorConfig
+from cuecal.google_auth import GOOGLE_SCOPES, SCOPE_CALENDAR_LIST, SCOPE_EVENTS
 from cuecal.models import MeetingCandidate
 from cuecal.sinks.google import GoogleCalendarSink
 from cuecal.sources import CalendarSource, Source
 from cuecal.sources.calendar import (
-    GOOGLE_SCOPES,
     MIRROR_OF,
-    SCOPE_CALENDAR_LIST,
-    SCOPE_EVENTS,
     required_scope,
     token_cursor_key,
     window_cursor_key,
