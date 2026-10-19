@@ -15,9 +15,16 @@ from google.oauth2.credentials import Credentials
 from cuecal import cli, db, google_auth, registry
 from cuecal.config import load_config, parse_config
 from cuecal.sinks.google import GoogleCalendarSink
+from cuecal.sources.calendar import (
+    CalendarInfo,
+    CalendarSource,
+    token_cursor_key,
+    window_cursor_key,
+)
 from cuecal.sources.gmail import GmailNotAuthorizedError
 
 TEAM = "team@group.calendar.google.com"
+WORK = "work_1%@group.calendar.google.com"
 CALENDAR_LIST = {
     "items": [
         {"id": "me@example.com", "summary": "Me", "accessRole": "owner", "primary": True},
@@ -296,6 +303,69 @@ def test_picker_refuses_a_target_listed_as_mirror_source(
     assert cli.main(argv) == 1
     assert "must not include the target calendar" in capsys.readouterr().err
     assert config.read_text(encoding="utf-8") == original
+
+
+def _seed_cursors(tmp_path) -> None:
+    conn = db.connect(tmp_path / "state.db")
+    try:
+        db.set_cursor(conn, token_cursor_key(WORK), "sync-token")
+        db.set_cursor(conn, window_cursor_key(WORK), "2026-11-01T00:00:00Z")
+        db.set_cursor(conn, "gmail", "gmail-cursor")
+    finally:
+        conn.close()
+
+
+def test_switching_target_clears_mirror_cursors_so_next_sync_lists_full_window(
+    store, flow, client_json, tmp_path, capsys
+):
+    (tmp_path / "config.toml").write_text(
+        f'[mirror]\nsource_calendars = ["{WORK}"]\n', encoding="utf-8"
+    )
+    _seed_cursors(tmp_path)
+    argv = ["auth", "google", "--client-json", str(client_json), "--calendar", TEAM]
+    assert cli.main(argv) == 0
+
+    assert "mirrors already on 'primary' stay there" in capsys.readouterr().out
+    conn = db.connect(tmp_path / "state.db")
+    try:
+        assert db.get_cursor(conn, token_cursor_key(WORK)) is None
+        assert db.get_cursor(conn, window_cursor_key(WORK)) is None
+        assert db.get_cursor(conn, "gmail") == "gmail-cursor"
+    finally:
+        conn.close()
+
+    listed: list[dict[str, Any]] = []
+
+    def calendar_api(method, path, params=None, body=None):
+        listed.append(dict(params or {}))
+        return {"items": []}
+
+    source = CalendarSource(
+        load_config(tmp_path / "config.toml").mirror, http_client=calendar_api
+    )
+    conn = db.connect(tmp_path / "state.db")
+    try:
+        source.sync_calendar(conn, CalendarInfo(id=WORK, summary="Work", access_role="reader"))
+    finally:
+        conn.close()
+    assert "syncToken" not in listed[0]
+    assert "timeMin" in listed[0]
+
+
+def test_keeping_the_same_target_keeps_mirror_cursors(store, flow, client_json, tmp_path):
+    (tmp_path / "config.toml").write_text(
+        f'[mirror]\ntarget_calendar = "{TEAM}"\nsource_calendars = ["{WORK}"]\n',
+        encoding="utf-8",
+    )
+    _seed_cursors(tmp_path)
+    argv = ["auth", "google", "--client-json", str(client_json), "--calendar", TEAM]
+    assert cli.main(argv) == 0
+
+    conn = db.connect(tmp_path / "state.db")
+    try:
+        assert db.get_cursor(conn, token_cursor_key(WORK)) == "sync-token"
+    finally:
+        conn.close()
 
 
 # -- shared credentials helper -----------------------------------------------------------

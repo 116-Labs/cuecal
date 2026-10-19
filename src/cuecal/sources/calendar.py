@@ -61,6 +61,12 @@ def window_cursor_key(calendar_id: str) -> str:
     return f"calendar-window:{calendar_id}"
 
 
+def reset_sync_cursors(conn: sqlite3.Connection) -> None:
+    """Forget every source calendar's sync position, so the next sync relists the window."""
+    db.delete_cursors(conn, token_cursor_key(""))
+    db.delete_cursors(conn, window_cursor_key(""))
+
+
 @dataclass(frozen=True)
 class CalendarInfo:
     id: str

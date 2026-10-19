@@ -40,7 +40,7 @@ from .models import MeetingCandidate
 from .sinks import fanout
 from .sinks.base import SinkCredentialsError
 from .sinks.google import GoogleCalendarSink
-from .sources.calendar import CalendarInfo, CalendarSource
+from .sources.calendar import CalendarInfo, CalendarSource, reset_sync_cursors
 from .sources.gmail import GmailNotAuthorizedError
 
 logger = logging.getLogger("cuecal.cli")
@@ -302,7 +302,24 @@ def _auth_google(args: argparse.Namespace) -> int:
         return 1
     path.write_text(text, encoding="utf-8")
     print(f"set mirror.target_calendar = {calendar_id!r} in {path}")
+    if calendar_id != cfg.mirror.target_calendar:
+        _restart_mirror_sync(cfg)
     return 0
+
+
+def _restart_mirror_sync(cfg: Config) -> None:
+    # Incremental sync tokens would skip unedited in-window events on the new target.
+    if paths.db_path().exists():
+        conn = db.connect(paths.db_path())
+        try:
+            reset_sync_cursors(conn)
+        finally:
+            conn.close()
+    if cfg.mirror.source_calendars:
+        print(
+            f"mirrors already on {cfg.mirror.target_calendar!r} stay there and stop updating; "
+            "delete them in Google Calendar if you no longer want them"
+        )
 
 
 def cmd_run(args: argparse.Namespace) -> int:

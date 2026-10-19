@@ -127,7 +127,7 @@ Your browser opens on Google's sign-in page; CueCal asks only for `calendar.even
 
 The credentials, including the OAuth client ID and secret, go into the OS keyring as entry `google` (or the name under `[secrets] google`). CueCal refreshes the access token itself. If Google refuses a refresh (revoked access, or a Testing-mode token past 7 days), commands stop with a message to run `cuecal auth google` again; without `--client-json` it reuses the stored client.
 
-Next, CueCal lists the calendars you can write to and asks you to pick one by number (`--calendar ID` skips the question). The choice is written as `[mirror] target_calendar` in `config.toml`, leaving the rest of the file untouched. The Google Calendar sink creates events there, dedupe searches it, and calendar mirroring writes there too; unset, it is `primary`. The target cannot also be one of `mirror.source_calendars`.
+Next, CueCal lists the calendars you can write to and asks you to pick one by number (`--calendar ID` skips the question). The choice is written as `[mirror] target_calendar` in `config.toml`, leaving the rest of the file untouched. The Google Calendar sink creates events there, dedupe searches it, and calendar mirroring writes there too; unset, it is `primary`. The target cannot also be one of `mirror.source_calendars`. Picking a different calendar makes the next run mirror the whole lookahead window into it again. Mirrors already on the old calendar stay there and stop updating, so delete them in Google Calendar if you no longer want them.
 
 ### Background service
 
