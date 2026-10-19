@@ -18,9 +18,34 @@ def test_default_config_loads(tmp_path):
     assert cfg.auto_create_threshold == 0.85
 
 
-def test_default_config_omits_removed_llm_and_pending_settings():
-    assert "[llm]" not in DEFAULT_CONFIG_TOML
+def test_default_config_leaves_llm_tiers_off_and_omits_removed_settings(tmp_path):
     assert "pending =" not in DEFAULT_CONFIG_TOML
+    assert "tiers =" not in DEFAULT_CONFIG_TOML
+    path = tmp_path / "config.toml"
+    write_default_config(path)
+    llm = load_config(path).llm
+    assert llm.local is None
+    assert llm.paid is None
+
+
+def test_default_config_documents_every_llm_key():
+    keys = (
+        "min_confidence",
+        "start_past_window_hours",
+        "timezone",
+        "[llm.local]",
+        "keep_alive",
+        "timeout_seconds",
+        "[llm.paid]",
+        "base_url",
+        "api_key_secret",
+        "daily_token_cap",
+        "daily_usd_cap",
+        "input_usd_per_mtok",
+        "output_usd_per_mtok",
+    )
+    for key in keys:
+        assert key in DEFAULT_CONFIG_TOML
 
 
 def test_v0_1_1_starter_config_names_the_removed_settings(tmp_path):
@@ -29,7 +54,7 @@ def test_v0_1_1_starter_config_names_the_removed_settings(tmp_path):
         '[llm]\ntiers = ["regex", "local"]\n\n[thresholds]\nauto_create = 0.85\npending = 0.5\n'
     )
     with pytest.raises(
-        ConfigError, match=r"\[llm\] and thresholds.pending were removed; delete them"
+        ConfigError, match=r"\[llm\]\.tiers and thresholds.pending were removed; delete them"
     ):
         load_config(path)
 
@@ -37,11 +62,131 @@ def test_v0_1_1_starter_config_names_the_removed_settings(tmp_path):
 @pytest.mark.parametrize(
     ("data", "message"),
     [
-        ({"llm": {"tiers": ["regex"]}}, r"\[llm\] was removed"),
+        ({"llm": {"tiers": ["regex"]}}, r"\[llm\]\.tiers was removed; delete them"),
+        (
+            {"llm": {"tiers": ["regex"], "local": {}}},
+            r"\[llm\]\.tiers was removed; delete them",
+        ),
         ({"thresholds": {"pending": 0.5}}, "thresholds.pending was removed"),
     ],
 )
 def test_single_removed_setting_is_named(data, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config(data)
+
+
+PAID = {
+    "provider": "anthropic",
+    "model": "some-model",
+    "api_key_secret": "anthropic",
+    "daily_token_cap": 1000,
+    "daily_usd_cap": 0.5,
+    "input_usd_per_mtok": 1.0,
+    "output_usd_per_mtok": 5.0,
+}
+SECRETS = {"anthropic": "cuecal-anthropic"}
+
+
+def test_llm_table_without_tiers_is_accepted_with_defaults():
+    llm = parse_config({"llm": {}}).llm
+    assert llm.min_confidence == 0.7
+    assert llm.start_past_window_hours == 24
+    assert llm.timezone == ""
+    assert llm.local is None and llm.paid is None
+
+
+def test_llm_local_defaults_keep_alive_to_thirty_seconds():
+    local = parse_config({"llm": {"local": {}}}).llm.local
+    assert local.provider == "ollama"
+    assert local.keep_alive == "30s"
+    assert local.host == "http://localhost:11434"
+    assert local.model
+
+
+def test_llm_full_schema_parses():
+    cfg = parse_config(
+        {
+            "secrets": SECRETS,
+            "llm": {
+                "min_confidence": 0.6,
+                "start_past_window_hours": 12,
+                "timezone": "Asia/Kolkata",
+                "local": {
+                    "provider": "ollama",
+                    "host": "http://box:11434/",
+                    "model": "gemma3:4b",
+                    "keep_alive": "5m",
+                    "timeout_seconds": 20,
+                },
+                "paid": PAID,
+            },
+        }
+    )
+    assert cfg.llm.min_confidence == 0.6
+    assert cfg.llm.timezone == "Asia/Kolkata"
+    assert cfg.llm.local.host == "http://box:11434"
+    assert cfg.llm.local.keep_alive == "5m"
+    assert cfg.llm.paid.daily_token_cap == 1000
+    assert cfg.llm.paid.output_usd_per_mtok == 5.0
+
+
+def test_llm_paid_openai_compatible_server_needs_no_key():
+    paid = dict(PAID, provider="openai", base_url="http://127.0.0.1:8080/v1")
+    del paid["api_key_secret"]
+    cfg = parse_config({"llm": {"paid": paid}})
+    assert cfg.llm.paid.api_key_secret == ""
+    assert cfg.llm.paid.base_url == "http://127.0.0.1:8080/v1"
+
+
+def test_llm_paid_https_base_url_with_a_key_is_accepted():
+    cfg = parse_config(_paid(base_url="https://proxy.example/"))
+    assert cfg.llm.paid.base_url == "https://proxy.example"
+
+
+def _paid(**changes):
+    paid = dict(PAID, **changes)
+    return {"secrets": SECRETS, "llm": {"paid": {k: v for k, v in paid.items() if v is not None}}}
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"llm": {"min_confidence": 1.5}}, "llm.min_confidence"),
+        ({"llm": {"min_confidence": True}}, "llm.min_confidence"),
+        ({"llm": {"start_past_window_hours": 0}}, "llm.start_past_window_hours"),
+        ({"llm": {"timezone": "Mars/Base"}}, "IANA"),
+        ({"llm": {"timezone": 5}}, "llm.timezone"),
+        ({"llm": {"extra": 1}}, r"unknown keys in \[llm\]"),
+        ({"llm": "on"}, r"\[llm\] must be a table"),
+        ({"llm": {"local": {"provider": "llamacpp"}}}, "llm.local.provider"),
+        ({"llm": {"local": {"host": "localhost"}}}, "llm.local.host"),
+        ({"llm": {"local": {"model": ""}}}, "llm.local.model"),
+        ({"llm": {"local": {"keep_alive": 30}}}, "llm.local.keep_alive"),
+        ({"llm": {"local": {"timeout_seconds": 0}}}, "llm.local.timeout_seconds"),
+        ({"llm": {"local": {"bogus": 1}}}, r"unknown keys in \[llm.local\]"),
+        (_paid(provider="gemini"), "llm.paid.provider"),
+        (_paid(provider=None), "llm.paid.provider"),
+        (_paid(model=None), "llm.paid.model"),
+        (_paid(api_key_secret="openrouter"), r"not a key under \[secrets\]"),
+        (_paid(api_key_secret=None), "required for the anthropic provider"),
+        (_paid(base_url="ftp://x"), "llm.paid.base_url"),
+        (_paid(base_url="http://proxy:8080"), "must use https when api_key_secret is set"),
+        (
+            _paid(provider="openai", base_url="http://proxy:8080/v1"),
+            "must use https when api_key_secret is set",
+        ),
+        (_paid(daily_token_cap=0), "llm.paid.daily_token_cap"),
+        (_paid(daily_token_cap=-5), "llm.paid.daily_token_cap"),
+        (_paid(daily_token_cap=1.5), "llm.paid.daily_token_cap"),
+        (_paid(daily_token_cap=None), "llm.paid.daily_token_cap"),
+        (_paid(daily_usd_cap=0), "llm.paid.daily_usd_cap"),
+        (_paid(daily_usd_cap="1"), "llm.paid.daily_usd_cap"),
+        (_paid(input_usd_per_mtok=-1), "llm.paid.input_usd_per_mtok"),
+        (_paid(output_usd_per_mtok=None), "llm.paid.output_usd_per_mtok"),
+        (_paid(bogus=1), r"unknown keys in \[llm.paid\]"),
+    ],
+)
+def test_llm_validation_errors(data, message):
     with pytest.raises(ConfigError, match=message):
         parse_config(data)
 

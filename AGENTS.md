@@ -32,7 +32,7 @@ uv run pytest
 |---|---|
 | `src/cuecal/cli.py` | CLI entry point and the `cuecal run` pipeline: source → extract → dedupe → route → sink |
 | `src/cuecal/sources/` | Native Gmail and Slack adapters; `mcp.py` is the one generic MCP adapter, driven by per-server files in `mappings/` |
-| `src/cuecal/extract/` | Tier 0 (link regex gate) and Tier 1 (`.ics` and known templates); Tiers 2–3 (LLM) are not built |
+| `src/cuecal/extract/` | Tier 0 (link regex gate), Tier 1 (`.ics` and known templates), Tier 2 (`tier2.py`: prompt, validation gate, regex-wins merge), Tier 3 (`tier3.py`: daily spend cap), raw-HTTP LLM adapters (`providers.py`) and the escalation plus telemetry flow (`escalate.py`) |
 | `src/cuecal/sinks/` | Sink protocol (`base.py`), Google Calendar sink, secondary-sink fan-out with retry |
 | `src/cuecal/` (rest) | Config, keyring secrets, SQLite state (`db.py`), plugin registry, pending notifier, launchd/Task Scheduler service, run lock |
 | `src/cuecal/eval/` | Eval fixture schema and the `cuecal eval` runner (`runner.py`) |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 import time
 import urllib.request
 from collections.abc import Callable
@@ -13,19 +14,23 @@ from typing import Any
 
 from dateutil import parser as dt_parser
 
+from cuecal import db
+from cuecal.config import LLMConfig, LocalLLMConfig
 from cuecal.eval.schema import EvalFixture, ExpectedCandidate
-from cuecal.extract import extract, tier1
+from cuecal.extract import escalate, extract, tier1
 from cuecal.models import MeetingCandidate, Message
 
 FIELDS = ("title", "start", "end", "tz", "join_url", "attendees")
-BUILT_TIERS = (1,)
-# Provisional Tier 2 -> Tier 3 gate until `[llm] min_confidence` lands with #8.
-DEFAULT_MIN_CONFIDENCE = 0.7
-DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+BUILT_TIERS = (1, 2, 3)
+_PAID_PROVIDERS = ("anthropic", "openai")
 
 
 class TierNotBuiltError(RuntimeError):
     """Raised when an eval is requested for an extraction tier that does not exist yet."""
+
+
+class EvalConfigError(ValueError):
+    """Raised when an LLM tier eval lacks the provider settings it needs."""
 
 
 @dataclass
@@ -51,6 +56,7 @@ class FixtureResult:
     input_tokens: int = 0
     output_tokens: int = 0
     escalated_t2: bool | None = None
+    ran_llm: bool = False
     field_correct: dict[str, bool] = field(default_factory=dict)
 
 
@@ -86,6 +92,10 @@ class EvalReport:
         """Tier 2 results that would go to Tier 3: (escalated, Tier 2 runs)."""
         ran = [r.escalated_t2 for r in self.results if r.escalated_t2 is not None]
         return sum(ran), len(ran)
+
+    @property
+    def llm_runs(self) -> int:
+        return sum(r.ran_llm for r in self.results)
 
     @property
     def input_tokens(self) -> int:
@@ -131,15 +141,18 @@ def _field_matches(name: str, expected: ExpectedCandidate, actual: MeetingCandid
     return getattr(expected, name) == getattr(actual, name)
 
 
-def run_tier1(fixture: EvalFixture) -> tuple[str, MeetingCandidate | None, bool]:
-    """Return (label, candidate, escalated). Escalated means a higher tier would be needed."""
-    message = fixture.input.to_message(message_id=fixture.id)
+def _tier1(message: Message) -> tuple[str, MeetingCandidate | None, bool]:
     cand = extract(message)
     if cand is None:
         return "not_invite", None, False
     fallback = cand.tier == "regex"
     escalated = fallback or cand.confidence < tier1.HIGH
     return ("mentions_meeting" if fallback else "new_invite"), cand, escalated
+
+
+def run_tier1(fixture: EvalFixture) -> tuple[str, MeetingCandidate | None, bool]:
+    """Return (label, candidate, escalated). Escalated means a higher tier would be needed."""
+    return _tier1(fixture.input.to_message(message_id=fixture.id))
 
 
 def tier2_escalates(response: Tier2Response, min_confidence: float) -> bool:
@@ -196,7 +209,53 @@ def ollama_ps_sampler(host: str, model: str | None, timeout: float = 2.0) -> Ram
 
 def require_built_tier(tier: int) -> None:
     if tier not in BUILT_TIERS:
-        raise TierNotBuiltError(f"tier {tier} not built (#8)")
+        raise TierNotBuiltError(f"tier {tier} not built")
+
+
+def llm_config_for(
+    tier: int, base: LLMConfig, *, provider: str | None = None, model: str | None = None
+) -> LLMConfig:
+    """Enable only the tier under test: tier 2 alone, or tier 3 alone without a Tier 2 hop."""
+    if tier == 2:
+        if provider and provider != "ollama":
+            raise EvalConfigError('tier 2 supports only the "ollama" provider')
+        local = base.local or LocalLLMConfig()
+        if model:
+            local = replace(local, model=model)
+        return replace(base, local=local, paid=None)
+    if tier == 3:
+        if base.paid is None:
+            raise EvalConfigError("tier 3 needs [llm.paid] in the config")
+        paid = base.paid
+        if provider:
+            if provider not in _PAID_PROVIDERS:
+                raise EvalConfigError(f"tier 3 provider must be one of {list(_PAID_PROVIDERS)}")
+            paid = replace(paid, provider=provider)
+        if model:
+            paid = replace(paid, model=model)
+        return replace(base, local=None, paid=paid)
+    return replace(base, local=None, paid=None)
+
+
+def _escalator(
+    tier: int,
+    llm: LLMConfig,
+    secret_names: dict[str, str] | None,
+    provider: str | None,
+    model: str | None,
+) -> escalate.Escalator | None:
+    if tier < 2:
+        return None
+    cfg = llm_config_for(tier, llm, provider=provider, model=model)
+    # Usage and telemetry stay in memory: an eval never spends from the run's daily cap.
+    conn = sqlite3.connect(":memory:")
+    db.migrate(conn)
+    return escalate.Escalator(
+        cfg,
+        conn=conn,
+        local=escalate.build_local_provider(cfg.local) if cfg.local else None,
+        paid=escalate.build_paid_provider(cfg.paid, secret_names or {}) if cfg.paid else None,
+    )
 
 
 def evaluate(
@@ -205,28 +264,54 @@ def evaluate(
     tier: int,
     provider: str | None = None,
     model: str | None = None,
+    llm: LLMConfig | None = None,
+    secret_names: dict[str, str] | None = None,
     tier2: Tier2Provider | None = None,
-    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    min_confidence: float | None = None,
     ram_sampler: RamSampler | None = None,
 ) -> EvalReport:
-    runs_tier2 = tier == 2 and tier2 is not None
-    if not runs_tier2:
-        require_built_tier(tier)
-    if ram_sampler is None and runs_tier2 and provider == "ollama":
-        ram_sampler = ollama_ps_sampler(DEFAULT_OLLAMA_HOST, model)
+    """Score `tier` on the fixtures; tiers 2-3 run on Tier 1's escalated candidates only.
+
+    `tier2` replaces the configured Tier 2 provider with a stub when `tier` is 2.
+    """
+    require_built_tier(tier)
+    llm = llm or LLMConfig()
+    stub = tier2 if tier == 2 else None
+    threshold = llm.min_confidence if min_confidence is None else min_confidence
+    escalator = None if stub else _escalator(tier, llm, secret_names, provider, model)
+    if escalator is not None:
+        active = escalator.local or escalator.paid
+        provider = provider or active.name
+        model = model or active.model
+    if ram_sampler is None and tier == 2 and provider == "ollama":
+        ram_sampler = ollama_ps_sampler((llm.local or LocalLLMConfig()).host, model)
     results: list[FixtureResult] = []
     peak_ram: int | None = None
     for fixture in fixtures:
         started = time.perf_counter()
-        label, cand, escalated = run_tier1(fixture)
+        message = fixture.input.to_message(message_id=fixture.id)
+        label, cand, escalated = _tier1(message)
         input_tokens = output_tokens = 0
         escalated_t2: bool | None = None
-        if runs_tier2 and escalated:
-            response = tier2(fixture.input.to_message(message_id=fixture.id), cand)
+        ran_llm = False
+        if stub is not None and escalated:
+            response = stub(message, cand)
+            ran_llm = True
             input_tokens, output_tokens = response.input_tokens, response.output_tokens
-            escalated_t2 = tier2_escalates(response, min_confidence)
+            escalated_t2 = tier2_escalates(response, threshold)
             if response.valid and response.candidate is not None:
                 cand = _keep_regex_links(response.candidate, cand)
+        elif escalator is not None and cand is not None:
+            outcome = escalator.process(message, cand, timezone=fixture.input.recipient_tz)
+            cand = outcome.candidate
+            if escalated and outcome.pending_reason is None:
+                label = "new_invite"
+            ran_llm = bool(outcome.attempts)
+            input_tokens = sum(a.input_tokens for a in outcome.attempts)
+            output_tokens = sum(a.output_tokens for a in outcome.attempts)
+            local = [a for a in outcome.attempts if a.tier == escalate.LOCAL_TIER]
+            if local:
+                escalated_t2 = not local[-1].passed
         latency_ms = (time.perf_counter() - started) * 1000
         if ram_sampler is not None:
             sample = ram_sampler()
@@ -248,6 +333,7 @@ def evaluate(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 escalated_t2=escalated_t2,
+                ran_llm=ran_llm,
                 field_correct=scores,
             )
         )
@@ -285,8 +371,8 @@ def _rows(report: EvalReport) -> list[tuple[str, str]]:
     rows.append(("mean latency", f"{report.mean_latency_ms:.2f} ms"))
     rows.append(("p50 latency", f"{report.latency_percentile(50):.2f} ms"))
     rows.append(("p95 latency", f"{report.latency_percentile(95):.2f} ms"))
-    rows.append(("input tokens", _per_candidate(report.input_tokens, t2_runs)))
-    rows.append(("output tokens", _per_candidate(report.output_tokens, t2_runs)))
+    rows.append(("input tokens", _per_candidate(report.input_tokens, report.llm_runs)))
+    rows.append(("output tokens", _per_candidate(report.output_tokens, report.llm_runs)))
     rows.append(("peak RAM", _ram(report.peak_ram_bytes)))
     return rows
 

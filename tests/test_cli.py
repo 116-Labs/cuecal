@@ -2266,3 +2266,199 @@ def test_cli_run_linkless_invite_shared_by_non_organizer_keys_on_ics_organizer(
 
     conn = db.connect(tmp_path / "state.db")
     assert len(db.list_pending(conn)) == 1
+
+
+LINK_ONLY_TEXT = "Quick sync tomorrow 3pm? https://zoom.us/j/98765432109 Passcode: 000111"
+
+
+class _RecordingSink:
+    name = "google-calendar"
+
+    def __init__(self):
+        self.created = []
+
+    def create(self, candidate):
+        self.created.append(candidate)
+        return f"evt{len(self.created)}"
+
+
+def _llm_pipeline(tmp_path, monkeypatch, llm_toml, ollama=None):
+    """Run once on a real link-only message through the real extractor; Ollama is mocked."""
+    import io
+    import json
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    assert cli.main(["init"]) == 0
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(config_path.read_text() + "\n" + llm_toml)
+    _set_dummy_source(config_path)
+    msg = Message(
+        id="msg_llm", source="dummy", sender="ana", ts=datetime.now(UTC), text=LINK_ONLY_TEXT
+    )
+    sink = _RecordingSink()
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else sink,
+    )
+    requests = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        requests.append(json.loads(req.data))
+        if ollama is None:
+            raise AssertionError("no HTTP call expected")
+        if isinstance(ollama, Exception):
+            raise ollama
+        body = {"message": {"content": json.dumps(ollama)}, "prompt_eval_count": 80}
+        return Resp(json.dumps(body).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    rc = cli.main(["run", "--once"])
+    return rc, sink, requests, db.connect(tmp_path / "state.db")
+
+
+def _ollama_answer(confidence):
+    from datetime import UTC, datetime, timedelta
+
+    start = (datetime.now(UTC) + timedelta(days=1)).replace(microsecond=0)
+    return {
+        "title": "Quick sync",
+        "start": start.isoformat(),
+        "end": (start + timedelta(minutes=30)).isoformat(),
+        "timezone": "UTC",
+        "attendees": [],
+        "confidence": confidence,
+    }
+
+
+def test_cli_run_without_llm_config_sends_partial_to_pending_without_http(
+    tmp_path, monkeypatch
+):
+    rc, sink, requests, conn = _llm_pipeline(tmp_path, monkeypatch, "")
+    assert rc == 0
+    assert requests == []
+    assert sink.created == []
+    [row] = db.list_pending(conn)
+    assert row["reason"].startswith("low confidence")
+    [telemetry] = db.list_extraction_telemetry(conn)
+    assert telemetry["tier"] == "regex"
+    assert telemetry["provider"] is None
+
+
+LOCAL_TOML = '[llm]\ntimezone = "UTC"\n\n[llm.local]\n'
+
+
+def test_cli_run_creates_tier2_result_that_clears_auto_create(tmp_path, monkeypatch):
+    rc, sink, requests, conn = _llm_pipeline(
+        tmp_path, monkeypatch, LOCAL_TOML, ollama=_ollama_answer(0.9)
+    )
+    assert rc == 0
+    assert requests[0]["keep_alive"] == "30s"
+    [created] = sink.created
+    assert created.tier == "local"
+    assert created.title == "Quick sync"
+    assert created.join_url == "https://zoom.us/j/98765432109"
+    assert created.passcode == "000111"
+    assert db.list_pending(conn) == []
+    [telemetry] = db.list_extraction_telemetry(conn)
+    assert (telemetry["tier"], telemetry["provider"], telemetry["input_tokens"]) == (
+        "local",
+        "ollama",
+        80,
+    )
+
+
+def test_cli_run_only_auto_create_decides_after_tier2_passes(tmp_path, monkeypatch):
+    rc, sink, _, conn = _llm_pipeline(
+        tmp_path, monkeypatch, LOCAL_TOML, ollama=_ollama_answer(0.75)
+    )
+    assert rc == 0
+    assert sink.created == []
+    [row] = db.list_pending(conn)
+    assert row["reason"] == "low confidence (0.75 < 0.85)"
+
+
+def test_cli_run_without_a_resolvable_timezone_queues_a_confident_tier2_result(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("cuecal.extract.tier2.system_timezone", lambda: None)
+    rc, sink, _, conn = _llm_pipeline(
+        tmp_path, monkeypatch, "[llm.local]\n", ollama=_ollama_answer(0.9)
+    )
+    assert rc == 0
+    assert sink.created == []
+    [row] = db.list_pending(conn)
+    assert row["reason"] == "recipient timezone unknown; set [llm].timezone"
+
+
+def test_cli_run_tier2_host_down_without_tier3_queues_partial_and_completes(
+    tmp_path, monkeypatch
+):
+    import urllib.error
+
+    rc, sink, requests, conn = _llm_pipeline(
+        tmp_path,
+        monkeypatch,
+        LOCAL_TOML,
+        ollama=urllib.error.URLError(ConnectionRefusedError("refused")),
+    )
+    assert rc == 0
+    assert len(requests) == 1
+    assert sink.created == []
+    [row] = db.list_pending(conn)
+    assert row["reason"].startswith("tier 2 failed: provider error")
+
+
+PAID_TOML = (
+    '[llm.paid]\nprovider = "anthropic"\nmodel = "m"\napi_key_secret = "anthropic"\n'
+    "daily_token_cap = 1000\ndaily_usd_cap = 1.0\n"
+    "input_usd_per_mtok = 1.0\noutput_usd_per_mtok = 1.0\n"
+)
+
+
+def _config_with_paid_secret_ref(tmp_path):
+    assert cli.main(["init"]) == 0
+    config_path = tmp_path / "config.toml"
+    text = config_path.read_text().replace(
+        "[secrets]\n", '[secrets]\nanthropic = "cuecal-anthropic"\n'
+    )
+    config_path.write_text(text)
+    return config_path
+
+
+def test_cli_run_with_tier3_key_missing_reports_at_start_and_queues(
+    tmp_path, monkeypatch, caplog
+):
+    _config_with_paid_secret_ref(tmp_path)
+    with caplog.at_level("ERROR", logger="cuecal.extract"):
+        rc, sink, requests, conn = _llm_pipeline(tmp_path, monkeypatch, PAID_TOML)
+    assert rc == 0
+    assert requests == []
+    assert "keyring entry 'cuecal-anthropic'" in caplog.text
+    [row] = db.list_pending(conn)
+    assert "tier 3 off" in row["reason"]
+
+
+def test_doctor_flags_missing_tier3_keyring_entry(tmp_path, capsys):
+    config_path = _config_with_paid_secret_ref(tmp_path)
+    config_path.write_text(config_path.read_text() + "\n" + PAID_TOML)
+    capsys.readouterr()
+    assert cli.main(["doctor"]) == 1
+    assert "llm.paid: keyring entry 'cuecal-anthropic'" in capsys.readouterr().out
+
+
+def test_doctor_reports_tier3_key_present(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "sk-x")
+    config_path = _config_with_paid_secret_ref(tmp_path)
+    config_path.write_text(config_path.read_text() + "\n" + PAID_TOML)
+    capsys.readouterr()
+    cli.main(["doctor"])
+    assert "llm.paid: ok (anthropic m)" in capsys.readouterr().out

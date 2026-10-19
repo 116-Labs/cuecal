@@ -9,6 +9,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_CONFIG_TOML = """\
 # CueCal configuration. Secrets live in the OS keyring; reference them by name below.
@@ -26,6 +27,32 @@ auto_create = 0.85
 [secrets]
 # provider = "keyring-entry-name"
 # Only keyring entry names belong here, never tokens. Store secrets with `cuecal auth <provider>`.
+
+# LLM tiers are off until configured: Tier 2 runs only with [llm.local], Tier 3 only with
+# [llm.paid]. They fill time, title and attendees for partial candidates; never the join link.
+# [llm]
+# min_confidence = 0.7            # Tier 2 results below this escalate to Tier 3
+# start_past_window_hours = 24    # reject starts this long before the message was received
+# timezone = "Europe/London"      # recipient IANA zone; default is the system zone
+#                                 # (TZ or /etc/localtime); with none, LLM results go to pending
+#
+# [llm.local]
+# provider = "ollama"
+# host = "http://localhost:11434"
+# model = "gemma3:1b"             # provisional; the model choice is open in #121
+# keep_alive = "30s"              # unloads the model between batches
+# timeout_seconds = 60
+#
+# [llm.paid]
+# provider = "anthropic"          # or "openai" for any OpenAI-compatible server
+# model = ""
+# base_url = ""                   # optional; required for a non-OpenAI "openai" server
+#                                 # (https whenever api_key_secret is set)
+# api_key_secret = "anthropic"    # a key under [secrets], never the API key itself
+# daily_token_cap = 200000
+# daily_usd_cap = 1.0
+# input_usd_per_mtok = 0.0        # prices are yours to set; there is no built-in table
+# output_usd_per_mtok = 0.0
 
 # Mirror secondary calendars into the target calendar: add "calendar" to `sources` and pick
 # calendar IDs from `cuecal mirror calendars`.
@@ -49,7 +76,9 @@ _TOP_KEYS = {
     "notify",
     "conference",
     "mirror",
+    "llm",
 }
+_PAID_PROVIDERS = ("anthropic", "openai")
 _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _TRANSPARENCIES = ("opaque", "transparent")
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
@@ -90,6 +119,37 @@ class MirrorConfig:
 
 
 @dataclass
+class LocalLLMConfig:
+    provider: str = "ollama"
+    host: str = "http://localhost:11434"
+    model: str = "gemma3:1b"
+    keep_alive: str = "30s"
+    timeout_seconds: float = 60.0
+
+
+@dataclass
+class PaidLLMConfig:
+    provider: str
+    model: str
+    daily_token_cap: int
+    daily_usd_cap: float
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+    base_url: str = ""
+    api_key_secret: str = ""
+
+
+@dataclass
+class LLMConfig:
+    min_confidence: float = 0.7
+    start_past_window_hours: float = 24.0
+    # Empty means the system zone, resolved when a prompt is built.
+    timezone: str = ""
+    local: LocalLLMConfig | None = None
+    paid: PaidLLMConfig | None = None
+
+
+@dataclass
 class Config:
     sources: list[str] = field(default_factory=list)
     sink: str = "google-calendar"
@@ -105,22 +165,27 @@ class Config:
     notify_ntfy_server: str = "https://ntfy.sh"
     conference: ConferenceConfig = field(default_factory=ConferenceConfig)
     mirror: MirrorConfig = field(default_factory=MirrorConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
-def _table(data: dict[str, Any], key: str, allowed: set[str]) -> dict[str, Any]:
+def _table(
+    data: dict[str, Any], key: str, allowed: set[str], label: str | None = None
+) -> dict[str, Any]:
+    label = label or key
     table = data.get(key, {})
     if not isinstance(table, dict):
-        raise ConfigError(f"[{key}] must be a table")
+        raise ConfigError(f"[{label}] must be a table")
     unknown = set(table) - allowed
     if unknown:
-        raise ConfigError(f"unknown keys in [{key}]: {', '.join(sorted(unknown))}")
+        raise ConfigError(f"unknown keys in [{label}]: {', '.join(sorted(unknown))}")
     return table
 
 
 def _reject_removed_settings(data: dict[str, Any]) -> None:
     removed = []
-    if "llm" in data:
-        removed.append("[llm]")
+    llm = data.get("llm")
+    if isinstance(llm, dict) and "tiers" in llm:
+        removed.append("[llm].tiers")
     thresholds = data.get("thresholds")
     if isinstance(thresholds, dict) and "pending" in thresholds:
         removed.append("thresholds.pending")
@@ -251,7 +316,140 @@ def parse_config(data: dict[str, Any]) -> Config:
 
     cfg.mirror = _parse_mirror(data)
     _check_mirror_target(cfg)
+    cfg.llm = _parse_llm(data, cfg.secrets)
     return cfg
+
+
+def _is_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int | float)
+
+
+def _positive(table: dict[str, Any], key: str, name: str, default: Any = None) -> float:
+    value = table.get(key, default)
+    if not _is_number(value) or value <= 0:
+        raise ConfigError(f"{name}.{key} must be a positive number")
+    return value
+
+
+def _non_negative(table: dict[str, Any], key: str, name: str) -> float:
+    value = table.get(key)
+    if not _is_number(value) or value < 0:
+        raise ConfigError(f"{name}.{key} must be a number of at least 0")
+    return float(value)
+
+
+def _string(table: dict[str, Any], key: str, name: str, default: str) -> str:
+    value = table.get(key, default)
+    if not isinstance(value, str):
+        raise ConfigError(f"{name}.{key} must be a string")
+    return value.strip()
+
+
+def _valid_zone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return False
+    return True
+
+
+def _parse_llm(data: dict[str, Any], secrets: dict[str, str]) -> LLMConfig:
+    default = LLMConfig()
+    llm = _table(
+        data, "llm", {"min_confidence", "start_past_window_hours", "timezone", "local", "paid"}
+    )
+    min_conf = llm.get("min_confidence", default.min_confidence)
+    if not _is_number(min_conf) or not 0 <= min_conf <= 1:
+        raise ConfigError("llm.min_confidence must be a number between 0 and 1")
+    window = _positive(llm, "start_past_window_hours", "llm", default.start_past_window_hours)
+    timezone = _string(llm, "timezone", "llm", default.timezone)
+    if timezone and not _valid_zone(timezone):
+        raise ConfigError(f"llm.timezone {timezone!r} is not an IANA timezone name")
+    return LLMConfig(
+        min_confidence=float(min_conf),
+        start_past_window_hours=float(window),
+        timezone=timezone,
+        local=_parse_llm_local(llm) if "local" in llm else None,
+        paid=_parse_llm_paid(llm, secrets) if "paid" in llm else None,
+    )
+
+
+def _parse_llm_local(llm: dict[str, Any]) -> LocalLLMConfig:
+    default = LocalLLMConfig()
+    local = _table(
+        llm, "local", {"provider", "host", "model", "keep_alive", "timeout_seconds"}, "llm.local"
+    )
+    provider = local.get("provider", default.provider)
+    if provider != "ollama":
+        raise ConfigError('llm.local.provider must be "ollama"')
+    host = _string(local, "host", "llm.local", default.host)
+    if not host.startswith(("https://", "http://")):
+        raise ConfigError("llm.local.host must be an http(s) URL")
+    model = _string(local, "model", "llm.local", default.model)
+    if not model:
+        raise ConfigError("llm.local.model must be a non-empty string")
+    keep_alive = _string(local, "keep_alive", "llm.local", default.keep_alive)
+    if not keep_alive:
+        raise ConfigError("llm.local.keep_alive must be a non-empty duration such as \"30s\"")
+    timeout = _positive(local, "timeout_seconds", "llm.local", default.timeout_seconds)
+    return LocalLLMConfig(
+        provider=provider,
+        host=host.rstrip("/"),
+        model=model,
+        keep_alive=keep_alive,
+        timeout_seconds=float(timeout),
+    )
+
+
+def _parse_llm_paid(llm: dict[str, Any], secrets: dict[str, str]) -> PaidLLMConfig:
+    paid = _table(
+        llm,
+        "paid",
+        {
+            "provider",
+            "model",
+            "base_url",
+            "api_key_secret",
+            "daily_token_cap",
+            "daily_usd_cap",
+            "input_usd_per_mtok",
+            "output_usd_per_mtok",
+        },
+        "llm.paid",
+    )
+    provider = paid.get("provider")
+    if provider not in _PAID_PROVIDERS:
+        raise ConfigError(f"llm.paid.provider must be one of {list(_PAID_PROVIDERS)}")
+    model = _string(paid, "model", "llm.paid", "")
+    if not model:
+        raise ConfigError("llm.paid.model must be a non-empty string")
+    base_url = _string(paid, "base_url", "llm.paid", "")
+    if base_url and not base_url.startswith(("https://", "http://")):
+        raise ConfigError("llm.paid.base_url must be an http(s) URL")
+    key_ref = _string(paid, "api_key_secret", "llm.paid", "")
+    if key_ref and key_ref not in secrets:
+        raise ConfigError(
+            f"llm.paid.api_key_secret {key_ref!r} is not a key under [secrets]; add "
+            f'{key_ref} = "<keyring entry name>" there'
+        )
+    if key_ref and base_url.startswith("http://"):
+        raise ConfigError("llm.paid.base_url must use https when api_key_secret is set")
+    # OpenAI-compatible local servers (llama.cpp, LM Studio) take no key.
+    if provider == "anthropic" and not key_ref:
+        raise ConfigError("llm.paid.api_key_secret is required for the anthropic provider")
+    token_cap = paid.get("daily_token_cap")
+    if isinstance(token_cap, bool) or not isinstance(token_cap, int) or token_cap <= 0:
+        raise ConfigError("llm.paid.daily_token_cap must be a positive integer")
+    return PaidLLMConfig(
+        provider=provider,
+        model=model,
+        base_url=base_url.rstrip("/"),
+        api_key_secret=key_ref,
+        daily_token_cap=token_cap,
+        daily_usd_cap=float(_positive(paid, "daily_usd_cap", "llm.paid")),
+        input_usd_per_mtok=_non_negative(paid, "input_usd_per_mtok", "llm.paid"),
+        output_usd_per_mtok=_non_negative(paid, "output_usd_per_mtok", "llm.paid"),
+    )
 
 
 def _check_mirror_target(cfg: Config) -> None:

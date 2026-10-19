@@ -22,7 +22,43 @@ def test_migrate_from_empty(tmp_path):
         "service_stat",
         "near_miss",
         "sink_delivery",
+        "llm_usage",
+        "extraction_telemetry",
     } <= _tables(conn)
+
+
+def test_llm_usage_accumulates_per_day_and_survives_a_new_connection(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    assert db.get_llm_usage(conn, "2026-10-18") == (0, 0.0)
+    db.add_llm_usage(conn, "2026-10-18", input_tokens=100, output_tokens=20, usd=0.01)
+    db.add_llm_usage(conn, "2026-10-18", input_tokens=50, output_tokens=5, usd=0.02)
+    conn.close()
+    reopened = db.connect(tmp_path / "state.db")
+    tokens, usd = db.get_llm_usage(reopened, "2026-10-18")
+    assert tokens == 175
+    assert usd == pytest.approx(0.03)
+    assert db.get_llm_usage(reopened, "2026-10-19") == (0, 0.0)
+
+
+def test_extraction_telemetry_round_trips(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    db.record_extraction(
+        conn,
+        source="slack",
+        message_id="m1",
+        tier="local",
+        provider="ollama",
+        model="gemma3:1b",
+        input_tokens=120,
+        output_tokens=30,
+        latency_ms=412.5,
+        outcome="ok",
+    )
+    [row] = db.list_extraction_telemetry(conn)
+    assert row["tier"] == "local"
+    assert row["provider"] == "ollama"
+    assert (row["input_tokens"], row["output_tokens"]) == (120, 30)
+    assert row["latency_ms"] == 412.5
 
 
 def test_migrate_is_idempotent(tmp_path):
