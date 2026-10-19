@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from cuecal import cli
+from cuecal.config import parse_config
 from cuecal.eval import load_fixtures, runner
 from cuecal.models import MeetingCandidate, Message
 
@@ -197,11 +198,6 @@ def test_tier2_to_tier3_escalation_is_counted_from_results(
     assert f"| escalated T2->T3 | {escalated}/1 |" in runner.render_markdown(report)
 
 
-def test_tier2_without_a_provider_is_still_not_built(subset_dir: Path):
-    with pytest.raises(runner.TierNotBuiltError):
-        runner.evaluate(load_fixtures(subset_dir), tier=2)
-
-
 def test_peak_ram_keeps_the_largest_sample_and_skips_unavailable_ones(subset_dir: Path):
     fixtures = [_low_confidence_fixture(subset_dir), *load_fixtures(subset_dir)]
     samples = iter([3 * 2**20, None, 5 * 2**20])
@@ -304,10 +300,106 @@ def test_tier1_counts_a_low_confidence_candidate_as_escalated(subset_dir: Path):
     assert report.escalated == 1
 
 
-@pytest.mark.parametrize("tier", [2, 3])
-def test_unbuilt_tiers_raise_tier_not_built(subset_dir: Path, tier: int):
-    with pytest.raises(runner.TierNotBuiltError, match=r"not built \(#8\)"):
-        runner.evaluate(load_fixtures(subset_dir), tier=tier)
+def test_unknown_tier_raises_tier_not_built(subset_dir: Path):
+    with pytest.raises(runner.TierNotBuiltError, match="tier 4 not built"):
+        runner.evaluate(load_fixtures(subset_dir), tier=4)
+
+
+class _FakeOllama(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _ollama_answer(monkeypatch, answer: dict, calls: list):
+    def fake_urlopen(req, timeout=None):
+        calls.append(json.loads(req.data))
+        body = {"message": {"content": json.dumps(answer)}, "prompt_eval_count": 50}
+        body["eval_count"] = 10
+        return _FakeOllama(json.dumps(body).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+
+SLACK_ANSWER = {
+    "title": "Quick sync",
+    "start": "2030-01-01T10:00:00",
+    "end": "2030-01-01T10:30:00",
+    "timezone": "UTC",
+    "attendees": [],
+    "confidence": 0.9,
+}
+
+
+def test_tier2_eval_escalates_only_partials_and_counts_tokens(tmp_path: Path, monkeypatch):
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", tmp_path)
+    shutil.copy(SUBSET[0], tmp_path)
+    calls: list = []
+    _ollama_answer(monkeypatch, SLACK_ANSWER, calls)
+    report = runner.evaluate(load_fixtures(tmp_path), tier=2, model="tiny")
+    assert len(calls) == 1
+    assert calls[0]["model"] == "tiny"
+    assert report.provider == "ollama"
+    assert report.model == "tiny"
+    assert (report.input_tokens, report.output_tokens) == (50, 10)
+    assert report.escalated == 1
+    assert report.escalated_t2() == (0, 1)
+    assert "| escalated T2->T3 | 0/1 |" in runner.render_markdown(report)
+
+
+def test_tier2_eval_counts_a_failed_answer_as_escalated_to_tier3(tmp_path: Path, monkeypatch):
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", tmp_path)
+    _ollama_answer(monkeypatch, dict(SLACK_ANSWER, confidence=0.1), [])
+    report = runner.evaluate(load_fixtures(tmp_path), tier=2)
+    assert report.escalated_t2() == (1, 1)
+
+
+def test_tier3_eval_without_paid_config_raises(subset_dir: Path):
+    with pytest.raises(runner.EvalConfigError, match=r"\[llm.paid\]"):
+        runner.evaluate(load_fixtures(subset_dir), tier=3)
+
+
+def test_tier2_eval_rejects_a_non_ollama_provider(subset_dir: Path):
+    with pytest.raises(runner.EvalConfigError, match="ollama"):
+        runner.evaluate(load_fixtures(subset_dir), tier=2, provider="anthropic")
+
+
+def test_tier3_eval_runs_the_paid_provider_without_a_tier2_hop(tmp_path: Path, monkeypatch):
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", tmp_path)
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        body = {
+            "choices": [{"message": {"content": json.dumps(SLACK_ANSWER)}}],
+            "usage": {"prompt_tokens": 70, "completion_tokens": 9},
+        }
+        return _FakeOllama(json.dumps(body).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    llm = parse_config(
+        {
+            "llm": {
+                "local": {},
+                "paid": {
+                    "provider": "openai",
+                    "model": "m",
+                    "base_url": "http://127.0.0.1:8080/v1",
+                    "daily_token_cap": 1000,
+                    "daily_usd_cap": 1.0,
+                    "input_usd_per_mtok": 0.0,
+                    "output_usd_per_mtok": 0.0,
+                },
+            }
+        }
+    ).llm
+    report = runner.evaluate(load_fixtures(tmp_path), tier=3, llm=llm)
+    assert calls == ["http://127.0.0.1:8080/v1/chat/completions"]
+    assert (report.input_tokens, report.output_tokens) == (70, 9)
+    assert report.provider == "openai"
+    assert report.field_accuracy()["join_url"] == (1, 1)
 
 
 def test_markdown_output_is_a_table_with_every_metric(subset_dir: Path):
@@ -352,11 +444,37 @@ def test_cli_eval_tier1_prints_markdown(subset_dir: Path, capsys):
     assert "| title accuracy | 100.0% (1/1) |" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("tier", ["2", "3"])
-def test_cli_eval_unbuilt_tier_exits_nonzero_with_message(subset_dir: Path, capsys, tier: str):
-    rc = cli.main(["eval", "--tier", tier, "--fixtures", str(subset_dir)])
-    assert rc != 0
-    assert f"tier {tier} not built (#8)" in capsys.readouterr().err
+@pytest.fixture
+def no_config(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CUECAL_CONFIG", str(tmp_path / "absent" / "config.toml"))
+
+
+def test_cli_eval_tier3_without_paid_config_exits_nonzero(subset_dir: Path, capsys, no_config):
+    rc = cli.main(["eval", "--tier", "3", "--fixtures", str(subset_dir)])
+    assert rc == 1
+    assert "tier 3 needs [llm.paid]" in capsys.readouterr().err
+
+
+def test_cli_eval_tier2_runs_on_ollama_defaults_without_config(
+    tmp_path: Path, monkeypatch, capsys, no_config
+):
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", tmp_path)
+    _ollama_answer(monkeypatch, SLACK_ANSWER, [])
+    rc = cli.main(["eval", "--tier", "2", "--fixtures", str(tmp_path), "--format", "markdown"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "| tier | 2 |" in out
+    assert "| input tokens | 50.0 per candidate (50 total) |" in out
+
+
+def test_cli_eval_tier2_reports_an_invalid_config(tmp_path: Path, monkeypatch, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text('[llm.local]\nprovider = "nope"\n', encoding="utf-8")
+    monkeypatch.setenv("CUECAL_CONFIG", str(config))
+    shutil.copy(SUBSET[0], tmp_path)
+    rc = cli.main(["eval", "--tier", "2", "--fixtures", str(tmp_path)])
+    assert rc == 1
+    assert "llm.local.provider" in capsys.readouterr().err
 
 
 def test_link_only_invite_scores_join_url_from_the_tier0_link(tmp_path: Path):
@@ -428,12 +546,12 @@ def test_cli_eval_empty_fixture_directory_exits_nonzero(tmp_path: Path, capsys):
     assert "no fixtures" in capsys.readouterr().err
 
 
-def test_cli_eval_unbuilt_tier_with_missing_fixtures_reports_tier_not_built(
-    tmp_path: Path, capsys
+def test_cli_eval_llm_tier_with_missing_fixtures_reports_the_directory(
+    tmp_path: Path, capsys, no_config
 ):
     rc = cli.main(["eval", "--tier", "2", "--fixtures", str(tmp_path / "missing")])
     assert rc == 1
-    assert "tier 2 not built (#8)" in capsys.readouterr().err
+    assert "missing" in capsys.readouterr().err
 
 
 def test_cli_eval_runs_against_the_shipped_fixture_corpus(capsys):

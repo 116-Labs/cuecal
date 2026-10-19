@@ -16,6 +16,7 @@ from typing import Any
 
 from . import __version__, db, dedupe, lock, log, notify, paths, registry, secrets, service
 from .config import Config, ConfigError, load_config, write_default_config
+from .extract.escalate import Escalator, paid_key_problem
 from .models import MeetingCandidate
 from .sinks import fanout
 from .sinks.base import SinkCredentialsError
@@ -231,6 +232,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             secondaries = _secondary_sinks(cfg)
             notifiers = notify.build_notifiers(cfg)
+            escalator = Escalator.from_config(
+                cfg, conn=conn, notifiers=notifiers, record=not args.dry_run
+            )
 
             sources = []
             mirror_source = None
@@ -286,7 +290,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                     for msg in messages:
                         if db.is_seen(conn, msg.source, msg.id):
                             continue
+                        started = time.perf_counter()
                         cand = extract(msg)
+                        extract_ms = (time.perf_counter() - started) * 1000
                         if not cand:
                             # Dropped candidate: record near-miss with score based on
                             # meeting signals
@@ -323,6 +329,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 db.mark_seen(conn, msg.source, msg.id)
                             continue
 
+                        # Ahead of escalation, so no LLM tokens go to an already-linked meeting.
+                        if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
+                            logger.info(
+                                "skipped duplicate meeting %r from %s", cand.title, msg.source
+                            )
+                            if not args.dry_run:
+                                db.mark_seen(conn, msg.source, msg.id)
+                            continue
+
+                        outcome = escalator.process(msg, cand, base_latency_ms=extract_ms)
+                        cand = outcome.candidate
+
                         is_linkless = False
                         if not cand.meeting_id:
                             is_linkless = True
@@ -333,14 +351,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 source=getattr(msg, "source", ""),
                                 message_id=getattr(msg, "id", ""),
                             )
-
-                        if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
-                            logger.info(
-                                "skipped duplicate meeting %r from %s", cand.title, msg.source
-                            )
-                            if not args.dry_run:
-                                db.mark_seen(conn, msg.source, msg.id)
-                            continue
 
                         # Check validation and confidence
                         is_valid = True
@@ -356,6 +366,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         if (
                             is_valid
                             and not is_linkless
+                            and outcome.pending_reason is None
                             and cand.confidence >= cfg.auto_create_threshold
                         ):
                             if _matches_sink_event(cand, sink_inst):
@@ -409,6 +420,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 reason = val_reason
                             elif is_linkless:
                                 reason = "linkless invite"
+                            elif outcome.pending_reason is not None:
+                                reason = outcome.pending_reason
                             else:
                                 reason = (
                                     f"low confidence ({cand.confidence:.2f} < "
@@ -902,6 +915,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for sink_name in (cfg.sink, *cfg.secondary_sinks):
             if not _doctor_check_sink(sink_name):
                 ok = False
+        if cfg.llm.paid is not None:
+            problem = paid_key_problem(cfg)
+            if problem:
+                ok = False
+                print(f"llm.paid: {problem}")
+            else:
+                print(f"llm.paid: ok ({cfg.llm.paid.provider} {cfg.llm.paid.model})")
 
     print(f"db path: {paths.db_path()}")
     try:
@@ -932,9 +952,24 @@ def cmd_eval(args: argparse.Namespace) -> int:
     if not fixtures:
         print(f"eval: no fixtures found under {args.fixtures}", file=sys.stderr)
         return 1
+    cfg = None
+    # Tier 2 runs on built-in Ollama defaults when there is no config file yet.
+    if args.tier >= 2 and paths.config_path().exists():
+        try:
+            cfg = load_config(paths.config_path())
+        except ConfigError as exc:
+            print(f"eval: {exc}", file=sys.stderr)
+            return 1
     try:
-        report = runner.evaluate(fixtures, tier=args.tier, provider=args.provider, model=args.model)
-    except runner.TierNotBuiltError as exc:
+        report = runner.evaluate(
+            fixtures,
+            tier=args.tier,
+            provider=args.provider,
+            model=args.model,
+            llm=cfg.llm if cfg else None,
+            secret_names=cfg.secrets if cfg else None,
+        )
+    except (runner.TierNotBuiltError, runner.EvalConfigError) as exc:
         print(f"eval: {exc}", file=sys.stderr)
         return 1
     render = runner.render_markdown if args.format == "markdown" else runner.render_table

@@ -104,6 +104,29 @@ MIGRATIONS: list[str] = [
     CREATE UNIQUE INDEX pending_source_message
         ON pending (source, message_id) WHERE message_id <> '';
     """,
+    """
+    CREATE TABLE llm_usage (
+        day TEXT PRIMARY KEY,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        usd REAL NOT NULL DEFAULT 0,
+        cap_notified INTEGER NOT NULL DEFAULT 0,
+        usage_unknown INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE extraction_telemetry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        provider TEXT,
+        model TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        latency_ms REAL NOT NULL DEFAULT 0,
+        outcome TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 SINK_DELIVERY_STATUSES = ("pending", "synced", "failed")
@@ -244,6 +267,111 @@ def get_counts_by_tier(conn: sqlite3.Connection) -> dict[str, int]:
     for name, cnt in rows:
         counts[name] = cnt or 0
     return counts
+
+
+def get_llm_usage(conn: sqlite3.Connection, day: str) -> tuple[int, float]:
+    """Return (total tokens, USD) spent on paid LLM calls on this local date."""
+    row = conn.execute(
+        "SELECT input_tokens + output_tokens, usd FROM llm_usage WHERE day = ?", (day,)
+    ).fetchone()
+    return (int(row[0]), float(row[1])) if row else (0, 0.0)
+
+
+def add_llm_usage(
+    conn: sqlite3.Connection, day: str, *, input_tokens: int, output_tokens: int, usd: float
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO llm_usage (day, input_tokens, output_tokens, usd) VALUES (?, ?, ?, ?)
+        ON CONFLICT(day) DO UPDATE SET
+            input_tokens = input_tokens + excluded.input_tokens,
+            output_tokens = output_tokens + excluded.output_tokens,
+            usd = usd + excluded.usd
+        """,
+        (day, input_tokens, output_tokens, usd),
+    )
+    conn.commit()
+
+
+def mark_llm_usage_unknown(conn: sqlite3.Connection, day: str) -> None:
+    """Record that a paid call on this local date returned no usable token counts."""
+    conn.execute("INSERT OR IGNORE INTO llm_usage (day) VALUES (?)", (day,))
+    conn.execute("UPDATE llm_usage SET usage_unknown = 1 WHERE day = ?", (day,))
+    conn.commit()
+
+
+def llm_usage_unknown(conn: sqlite3.Connection, day: str) -> bool:
+    row = conn.execute("SELECT usage_unknown FROM llm_usage WHERE day = ?", (day,)).fetchone()
+    return bool(row and row[0])
+
+
+def claim_cap_notice(conn: sqlite3.Connection, day: str) -> bool:
+    """True the first time it is called for a day, so the cap notice is sent once per day."""
+    conn.execute("INSERT OR IGNORE INTO llm_usage (day) VALUES (?)", (day,))
+    cursor = conn.execute(
+        "UPDATE llm_usage SET cap_notified = 1 WHERE day = ? AND cap_notified = 0", (day,)
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+_TELEMETRY_COLUMNS = (
+    "id",
+    "source",
+    "message_id",
+    "tier",
+    "provider",
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "latency_ms",
+    "outcome",
+    "created_at",
+)
+
+
+def record_extraction(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    message_id: str,
+    tier: str,
+    provider: str | None = None,
+    model: str | None = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    latency_ms: float = 0.0,
+    outcome: str | None = None,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO extraction_telemetry (
+            source, message_id, tier, provider, model, input_tokens, output_tokens,
+            latency_ms, outcome
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            source,
+            message_id,
+            tier,
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+            latency_ms,
+            outcome,
+        ),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def list_extraction_telemetry(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        f"SELECT {', '.join(_TELEMETRY_COLUMNS)} FROM extraction_telemetry ORDER BY id ASC"
+    ).fetchall()
+    return [dict(zip(_TELEMETRY_COLUMNS, r, strict=True)) for r in rows]
 
 
 def get_cursor(conn: sqlite3.Connection, source_name: str) -> str | None:

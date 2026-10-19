@@ -121,6 +121,19 @@ def build_notifiers(cfg: Config) -> list[Notifier]:
     return notifiers
 
 
+def notify_alert(notifiers: list[Notifier], title: str, body: str) -> None:
+    """Send an operational notice; a failing channel is logged and never breaks the run."""
+    _send_all(notifiers, Notification(title=title, body=body))
+
+
+def _send_all(notifiers: list[Notifier], notification: Notification) -> None:
+    for notifier in notifiers:
+        try:
+            notifier.send(notification)
+        except Exception as exc:  # noqa: BLE001 - notification failure must not stop polling
+            logger.warning("%s notification failed: %s", notifier.name, exc)
+
+
 def notify_pending(
     notifiers: list[Notifier],
     candidate: MeetingCandidate,
@@ -131,9 +144,4 @@ def notify_pending(
     """Send to every notifier; a failing channel is logged and never breaks the run."""
     if not notifiers:
         return
-    notification = build_notification(candidate, snippet=snippet, pending_id=pending_id)
-    for notifier in notifiers:
-        try:
-            notifier.send(notification)
-        except Exception as exc:  # noqa: BLE001 - notification failure must not stop polling
-            logger.warning("%s notification failed: %s", notifier.name, exc)
+    _send_all(notifiers, build_notification(candidate, snippet=snippet, pending_id=pending_id))
