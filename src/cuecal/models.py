@@ -29,10 +29,12 @@ class MeetingCandidate:
     meeting_id: str | None = None
     passcode: str | None = None
     attendees: list[str] = field(default_factory=list)
+    organizer: str | None = None
     source_ref: str | None = None
     confidence: float = 0.0
     tier: str = "regex"
     method: str | None = None
+    dedupe_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,10 +46,12 @@ class MeetingCandidate:
             "meeting_id": self.meeting_id,
             "passcode": self.passcode,
             "attendees": list(self.attendees),
+            "organizer": self.organizer,
             "source_ref": self.source_ref,
             "confidence": self.confidence,
             "tier": self.tier,
             "method": self.method,
+            "dedupe_key": self.dedupe_key,
         }
 
     def to_json(self) -> str:
@@ -80,10 +84,12 @@ class MeetingCandidate:
             meeting_id=data.get("meeting_id"),
             passcode=data.get("passcode"),
             attendees=list(data.get("attendees", [])),
+            organizer=data.get("organizer"),
             source_ref=data.get("source_ref"),
             confidence=float(data.get("confidence", 0.0)),
             tier=data.get("tier", "regex"),
             method=data.get("method"),
+            dedupe_key=data.get("dedupe_key"),
         )
 
     @classmethod

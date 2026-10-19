@@ -420,6 +420,57 @@ def get_sink_delivery_counts(conn: sqlite3.Connection) -> dict[str, dict[str, in
     return counts
 
 
+_PENDING_COLUMNS = (
+    "id",
+    "source",
+    "message_id",
+    "candidate_json",
+    "confidence",
+    "reason",
+    "source_snippet",
+    "status",
+    "created_at",
+)
+
+
+def find_pending_by_meeting_id(
+    conn: sqlite3.Connection, meeting_id: str
+) -> dict[str, Any] | None:
+    """Return the pending row for this meeting ID, regardless of status."""
+    if not meeting_id:
+        return None
+    row = conn.execute(
+        f"""
+        SELECT {', '.join(_PENDING_COLUMNS)}
+        FROM pending
+        WHERE json_extract(candidate_json, '$.meeting_id') = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (meeting_id,),
+    ).fetchone()
+    return dict(zip(_PENDING_COLUMNS, row, strict=True)) if row else None
+
+
+def find_pending_by_dedupe_key(
+    conn: sqlite3.Connection, dedupe_key: str
+) -> dict[str, Any] | None:
+    """Return the pending row for this linkless dedupe key, regardless of status."""
+    if not dedupe_key:
+        return None
+    row = conn.execute(
+        f"""
+        SELECT {', '.join(_PENDING_COLUMNS)}
+        FROM pending
+        WHERE json_extract(candidate_json, '$.dedupe_key') = ?
+        ORDER BY id
+        LIMIT 1
+        """,
+        (dedupe_key,),
+    ).fetchone()
+    return dict(zip(_PENDING_COLUMNS, row, strict=True)) if row else None
+
+
 def add_pending(
     conn: sqlite3.Connection,
     *,
@@ -464,19 +515,6 @@ def add_pending(
     return int(existing["id"])
 
 
-_PENDING_COLUMNS = (
-    "id",
-    "source",
-    "message_id",
-    "candidate_json",
-    "confidence",
-    "reason",
-    "source_snippet",
-    "status",
-    "created_at",
-)
-
-
 def find_pending_by_message(
     conn: sqlite3.Connection, *, source: str, message_id: str
 ) -> dict[str, Any] | None:
@@ -495,6 +533,7 @@ def find_pending_by_message(
         (source, message_id),
     ).fetchone()
     return dict(zip(_PENDING_COLUMNS, row, strict=True)) if row else None
+
 
 
 def get_pending(conn: sqlite3.Connection, pending_id: int) -> dict[str, Any] | None:
