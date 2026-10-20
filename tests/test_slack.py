@@ -437,7 +437,17 @@ def test_cli_auth_slack_token_flag():
 
 
 def test_cli_auth_slack_interactive(monkeypatch, capsys):
-    monkeypatch.setattr("builtins.input", lambda prompt: "xoxp-interactive-token")
+    monkeypatch.setattr("cuecal.cli.getpass.getpass", lambda prompt: "xoxp-interactive-token")
     assert cli.main(["auth", "slack"]) == 0
     assert secrets.get_secret("slack") == "xoxp-interactive-token"
     assert "stored slack token in keyring" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt])
+def test_cli_auth_slack_interactive_cancellation(monkeypatch, capsys, error):
+    def cancel(prompt):
+        raise error
+
+    monkeypatch.setattr("cuecal.cli.getpass.getpass", cancel)
+    assert cli.main(["auth", "slack"]) == 1
+    assert "auth cancelled" in capsys.readouterr().err
