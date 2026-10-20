@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
@@ -46,6 +46,10 @@ class GoogleAuthError(RuntimeError):
 
 class GoogleCredentialsMissing(GoogleAuthError):
     """Raised when no Google sign-in is stored in the keyring."""
+
+
+class GoogleUnreachable(GoogleAuthError):
+    """Raised when the token endpoint cannot be reached; the stored sign-in stays valid."""
 
 
 def secret_name(secret_refs: Mapping[str, str] | None = None) -> str:
@@ -90,6 +94,8 @@ def get_access_token(name: str = SECRET_NAME) -> str:
             raise GoogleAuthError(
                 f"Google refused to refresh the stored sign-in ({exc}); {REAUTH_HINT}"
             ) from exc
+        except TransportError as exc:
+            raise GoogleUnreachable(f"cannot reach Google to refresh the sign-in: {exc}") from exc
         secrets.set_secret(name, creds.to_json())
     return creds.token
 

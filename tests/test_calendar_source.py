@@ -53,6 +53,7 @@ class FakeCalendarApi:
         self.sources: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
         self.calls: list[tuple[str, str, dict[str, Any], dict[str, Any] | None]] = []
         self.calendar_list_error: Exception | None = None
+        self.target_names = {"primary", ME}
         self._ids = 0
 
     def seed(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -78,7 +79,7 @@ class FakeCalendarApi:
         parts = path.split("/")
         cal = urllib.parse.unquote(parts[2])
         event_id = urllib.parse.unquote(parts[4]) if len(parts) > 4 else None
-        if cal not in ("primary", ME):
+        if cal not in self.target_names:
             assert method == "GET", f"wrote to source calendar {cal}"
             return self.sources[cal](params)
         return self._target(method, event_id, params, json)
@@ -542,6 +543,23 @@ def test_mirrors_never_carry_original_guests(api, conn, self_attendee):
     assert "Work (other account)" in mirror["description"]
     assert "Original event: https://www.google.com/calendar/event?eid=g1" in mirror["description"]
     assert mirror["extendedProperties"]["private"]["cuecalMeetingId"] == "abc-defg-hij"
+
+
+def test_non_primary_target_mirrors_invited_events_without_inviting_the_account(api, conn):
+    shared = "shared@group.calendar.google.com"
+    api.target_names = {shared}
+    invited = event(
+        "inv1",
+        NOW + timedelta(days=1),
+        attendees=[{"email": ME, "responseStatus": "accepted"}],
+    )
+    api.sources[WORK] = ScriptedCalendar([invited])
+    make_source(api, [WORK], target_calendar=shared, self_attendee=True).sync(conn)
+
+    assert set(mirrors(api)) == {f"{WORK}:inv1"}
+    [post] = [c for c in api.writes() if c[0] == "POST"]
+    assert post[1] == f"/calendars/{urllib.parse.quote(shared, safe='')}/events"
+    assert post[3]["attendees"] == []
 
 
 def test_every_mirror_write_sends_no_emails(api, conn):

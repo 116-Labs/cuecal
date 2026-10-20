@@ -29,6 +29,7 @@ from . import (
     service,
 )
 from .config import (
+    DEFAULT_CONFIG_TOML,
     Config,
     ConfigError,
     load_config,
@@ -283,28 +284,60 @@ def _auth_google(args: argparse.Namespace) -> int:
         print(f"dry-run: would sign in to Google and store the result in keyring entry {name!r}")
         return 0
 
+    # A running cuecal keeps the old target and would write back the mirror cursors that a
+    # target switch resets.
+    instance_lock = lock.SingleInstanceLock()
+    if not instance_lock.acquire():
+        print(
+            "error: cuecal is running; stop it before `cuecal auth google`, then start it again",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        return _sign_in_and_set_target(args, cfg, name, client, path)
+    finally:
+        instance_lock.release()
+
+
+def _sign_in_and_set_target(
+    args: argparse.Namespace, cfg: Config, name: str, client: dict[str, Any], path: Path
+) -> int:
     try:
         creds = google_auth.sign_in(client)
     except google_auth.GoogleAuthError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    previous = secrets.get_secret(name)
     secrets.set_secret(name, creds.to_json())
     print(f"stored Google sign-in in keyring entry {name!r}")
 
+    if not _set_target_calendar(args, cfg, name, path):
+        # A new account paired with the old target could write invites to the wrong calendar.
+        if previous is None:
+            secrets.delete_secret(name)
+        else:
+            secrets.set_secret(name, previous)
+        print("the new Google sign-in was not kept", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _set_target_calendar(args: argparse.Namespace, cfg: Config, name: str, path: Path) -> bool:
     calendar_id = args.calendar or _pick_calendar(cfg, name)
     if not calendar_id:
-        return 1
-    write_default_config(path)
+        return False
     try:
-        text = set_target_calendar(path.read_text(encoding="utf-8"), calendar_id)
-    except ConfigError as exc:
+        current = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_CONFIG_TOML
+        text = set_target_calendar(current, calendar_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except (ConfigError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
-    path.write_text(text, encoding="utf-8")
+        return False
     print(f"set mirror.target_calendar = {calendar_id!r} in {path}")
     if calendar_id != cfg.mirror.target_calendar:
         _restart_mirror_sync(cfg)
-    return 0
+    return True
 
 
 def _restart_mirror_sync(cfg: Config) -> None:

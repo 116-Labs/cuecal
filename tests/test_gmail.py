@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from cuecal import google_auth
 from cuecal.config import ConfigError, parse_config
 from cuecal.extract import extract
 from cuecal.sources import GmailSource, Source
@@ -478,6 +479,27 @@ def test_gmail_403_rate_limit_stays_an_http_error(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", forbidden)
     with pytest.raises(urllib.error.HTTPError):
         GmailSource(token_provider="t").fetch_since(None)
+
+
+@pytest.mark.parametrize(
+    ("cursor", "message_path"),
+    [(None, "/users/me/messages/msg_html_zoom"), ("100500", "/users/me/messages/msg_new_teams")],
+)
+@pytest.mark.parametrize(
+    "error",
+    [
+        GmailNotAuthorizedError("Gmail not authorized"),
+        google_auth.GoogleAuthError("Google refused to refresh the stored sign-in"),
+    ],
+)
+def test_auth_error_on_a_message_fetch_propagates_instead_of_advancing_the_cursor(
+    mock_gmail_api, cursor, message_path, error
+):
+    client, _ = mock_gmail_api
+    client.responses[message_path] = error
+    source = GmailSource(token_provider="dummy-token", http_client=client)
+    with pytest.raises(type(error)):
+        source.fetch_since(cursor)
 
 
 def test_config_gmail_section_parsing():

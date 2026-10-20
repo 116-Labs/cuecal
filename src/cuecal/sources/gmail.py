@@ -31,6 +31,10 @@ class GmailNotAuthorizedError(RuntimeError):
     """Raised when the stored Google sign-in carries no Gmail scope."""
 
 
+# Swallowing these per message would let the history cursor advance past unfetched messages.
+_AUTH_ERRORS = (google_auth.GoogleAuthError, GmailNotAuthorizedError)
+
+
 class _HTMLToText(HTMLParser):
     """HTML parser converting email HTML to readable plain text, preserving link URLs."""
 
@@ -374,6 +378,8 @@ class GmailSource:
                 if h_id > max_history_id:
                     max_history_id = h_id
                 messages.append(parse_gmail_message(msg_data))
+            except _AUTH_ERRORS:
+                raise
             except Exception as exc:
                 logger.warning("Failed to fetch Gmail message %s: %s", msg_id, exc)
 
@@ -454,6 +460,8 @@ class GmailSource:
                     )
                     if matches_query(msg_data, self.query):
                         messages.append(parse_gmail_message(msg_data))
+                except _AUTH_ERRORS:
+                    raise
                 except Exception as exc:
                     logger.warning("Failed to fetch Gmail message %s: %s", msg_id, exc)
 

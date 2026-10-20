@@ -331,6 +331,15 @@ class CalendarSource:
         primary = next((c for c in self.list_calendars() if c.primary), None)
         return primary.id.lower() if primary and "@" in primary.id else None
 
+    def primary_target_email(self) -> str | None:
+        """The account email when the target is its primary calendar, else None.
+
+        An invite to that email already sits on the primary calendar only, and inviting it to
+        a mirror on another calendar would put a second copy there.
+        """
+        email = self.self_email()
+        return email if email and email in self.target_ids() else None
+
     def target_ids(self) -> set[str]:
         """Lower-cased IDs naming the target calendar ("primary" and its account email)."""
         target = self.cfg.target_calendar.lower()
@@ -517,7 +526,7 @@ class CalendarSource:
                 self._request("DELETE", self._target_path(mirror["id"]), params=dict(_NO_EMAIL))
             return op
 
-        email = self.self_email()
+        email = self.primary_target_email()
         reason = skip_reason(
             event, self_email=email, include_transparent=self.cfg.include_transparent
         )

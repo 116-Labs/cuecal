@@ -10,9 +10,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from google.auth.exceptions import TransportError
 from google.oauth2.credentials import Credentials
 
-from cuecal import cli, db, google_auth, registry
+from cuecal import cli, db, google_auth, lock, registry
 from cuecal.config import load_config, parse_config
 from cuecal.sinks.google import GoogleCalendarSink
 from cuecal.sources.calendar import (
@@ -59,6 +60,7 @@ def store(monkeypatch) -> dict[str, str]:
     entries: dict[str, str] = {}
     monkeypatch.setattr("cuecal.secrets.get_secret", entries.get)
     monkeypatch.setattr("cuecal.secrets.set_secret", entries.__setitem__)
+    monkeypatch.setattr("cuecal.secrets.delete_secret", lambda ref: entries.pop(ref, None))
     return entries
 
 
@@ -352,6 +354,63 @@ def test_switching_target_clears_mirror_cursors_so_next_sync_lists_full_window(
     assert "timeMin" in listed[0]
 
 
+def test_auth_google_refuses_while_a_run_holds_the_lock_and_changes_nothing(
+    store, flow, client_json, tmp_path, capsys
+):
+    config = tmp_path / "config.toml"
+    original = f'[mirror]\nsource_calendars = ["{WORK}"]\n'
+    config.write_text(original, encoding="utf-8")
+    _seed_cursors(tmp_path)
+    store["google"] = creds_blob("old-access")
+
+    running = lock.SingleInstanceLock(tmp_path / "cuecal.lock")
+    assert running.acquire()
+    try:
+        argv = ["auth", "google", "--client-json", str(client_json), "--calendar", TEAM]
+        assert cli.main(argv) == 1
+    finally:
+        running.release()
+
+    assert "cuecal is running" in capsys.readouterr().err
+    assert flow.server_kwargs == []
+    assert json.loads(store["google"])["token"] == "old-access"
+    assert config.read_text(encoding="utf-8") == original
+    conn = db.connect(tmp_path / "state.db")
+    try:
+        assert db.get_cursor(conn, token_cursor_key(WORK)) == "sync-token"
+        assert db.get_cursor(conn, window_cursor_key(WORK)) == "2026-11-01T00:00:00Z"
+    finally:
+        conn.close()
+
+
+def test_cancelled_picker_restores_the_previous_sign_in(
+    monkeypatch, store, flow, client_json, calendar_api, tmp_path, capsys
+):
+    previous = creds_blob("old-access")
+    store["google"] = previous
+
+    def cancel(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", cancel)
+    assert cli.main(["auth", "google", "--client-json", str(client_json)]) == 1
+    assert "was not kept" in capsys.readouterr().err
+    assert store["google"] == previous
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_rejected_target_removes_a_first_sign_in_and_writes_no_config(
+    store, flow, client_json, tmp_path
+):
+    config = tmp_path / "config.toml"
+    original = f'[mirror]\nsource_calendars = ["{TEAM}"]\n'
+    config.write_text(original, encoding="utf-8")
+    argv = ["auth", "google", "--client-json", str(client_json), "--calendar", TEAM]
+    assert cli.main(argv) == 1
+    assert store == {}
+    assert config.read_text(encoding="utf-8") == original
+
+
 def test_keeping_the_same_target_keeps_mirror_cursors(store, flow, client_json, tmp_path):
     (tmp_path / "config.toml").write_text(
         f'[mirror]\ntarget_calendar = "{TEAM}"\nsource_calendars = ["{WORK}"]\n',
@@ -400,6 +459,22 @@ def test_refresh_error_names_cuecal_auth_google(monkeypatch, store):
     _token_endpoint(monkeypatch, 400, INVALID_GRANT)
     with pytest.raises(google_auth.GoogleAuthError, match="run `cuecal auth google` again"):
         google_auth.get_access_token()
+
+
+def test_unreachable_token_endpoint_raises_google_unreachable_without_reauth_hint(
+    monkeypatch, store
+):
+    blob = creds_blob("stale", expires_in=timedelta(hours=-1))
+    store["google"] = blob
+
+    def offline(*args, **kwargs):
+        raise TransportError("connection refused")
+
+    monkeypatch.setattr(google_auth, "Request", lambda: offline)
+    with pytest.raises(google_auth.GoogleUnreachable) as raised:
+        google_auth.get_access_token()
+    assert google_auth.REAUTH_HINT not in str(raised.value)
+    assert store["google"] == blob
 
 
 def test_unreadable_keyring_entry_asks_for_sign_in_again(store):
