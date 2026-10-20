@@ -12,15 +12,37 @@ import sys
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from . import __version__, db, dedupe, lock, log, notify, paths, registry, secrets, service
-from .config import Config, ConfigError, load_config, write_default_config
+from . import (
+    __version__,
+    db,
+    dedupe,
+    google_auth,
+    lock,
+    log,
+    notify,
+    paths,
+    registry,
+    secrets,
+    service,
+)
+from .config import (
+    DEFAULT_CONFIG_TOML,
+    Config,
+    ConfigError,
+    load_config,
+    set_target_calendar,
+    write_default_config,
+)
 from .extract.escalate import Escalator, paid_key_problem
 from .models import MeetingCandidate
 from .sinks import fanout
 from .sinks.base import SinkCredentialsError
-from .sources.calendar import CalendarSource
+from .sinks.google import GoogleCalendarSink
+from .sources.calendar import CalendarInfo, CalendarSource, reset_sync_cursors
+from .sources.gmail import GmailNotAuthorizedError
 
 logger = logging.getLogger("cuecal.cli")
 
@@ -30,12 +52,25 @@ def _not_implemented(name: str) -> int:
     return 2
 
 
+def _google_sink(cfg: Config, cls: type[GoogleCalendarSink] = GoogleCalendarSink) -> Any:
+    # Invites and mirrors share one calendar so dedupe sees both.
+    return cls(calendar_id=cfg.mirror.target_calendar, secret_ref=cfg.secrets.get("google"))
+
+
+def _sink(cfg: Config, name: str) -> Any:
+    """Resolve a sink plugin; the Google sink is configured with the target calendar."""
+    plugin = registry.get("sinks", name)
+    if isinstance(plugin, type) and issubclass(plugin, GoogleCalendarSink):
+        return _google_sink(cfg, plugin)
+    return plugin
+
+
 def _secondary_sinks(cfg: Config) -> dict[str, object | None]:
     """Resolve configured secondary sinks; an unregistered one maps to None and fails per write."""
     resolved: dict[str, object | None] = {}
     for name in cfg.secondary_sinks:
         try:
-            resolved[name] = registry.get("sinks", name)
+            resolved[name] = _sink(cfg, name)
         except KeyError:
             logger.warning("secondary sink %r not found; its writes are recorded as failed", name)
             resolved[name] = None
@@ -43,7 +78,7 @@ def _secondary_sinks(cfg: Config) -> dict[str, object | None]:
 
 
 def _calendar_source(cfg: Config) -> CalendarSource:
-    return CalendarSource(cfg.mirror)
+    return CalendarSource(cfg.mirror, target=_google_sink(cfg))
 
 
 def _sync_mirrors(conn: sqlite3.Connection, source: CalendarSource, *, dry_run: bool) -> None:
@@ -201,7 +236,123 @@ def cmd_auth(args: argparse.Namespace) -> int:
         secrets.set_secret("slack", token)
         print("stored slack token in keyring")
         return 0
+    if args.provider == "google":
+        return _auth_google(args)
     return _not_implemented(f"auth {args.provider}")
+
+
+def _pick_calendar(cfg: Config, secret_ref: str) -> str | None:
+    source = CalendarSource(cfg.mirror, target=GoogleCalendarSink(secret_ref=secret_ref))
+    try:
+        choices: list[CalendarInfo] = [c for c in source.list_calendars() if c.writable]
+    except (OSError, SinkCredentialsError) as exc:
+        print(f"error: cannot list your calendars ({exc}); pass --calendar ID", file=sys.stderr)
+        return None
+    if not choices:
+        print("error: this Google account has no calendar you can write to", file=sys.stderr)
+        return None
+    print("Calendars you can write to:")
+    for number, cal in enumerate(choices, 1):
+        tag = " [primary]" if cal.primary else ""
+        print(f"  {number}. {cal.summary or cal.id} ({cal.id}){tag}")
+    while True:
+        try:
+            answer = input(f"Calendar for CueCal events [1-{len(choices)}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nauth cancelled", file=sys.stderr)
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            picked = choices[int(answer) - 1]
+            return "primary" if picked.primary else picked.id
+        print(f"enter a number from 1 to {len(choices)}")
+
+
+def _auth_google(args: argparse.Namespace) -> int:
+    path = paths.config_path()
+    try:
+        cfg = load_config(path) if path.exists() else Config()
+        name = google_auth.secret_name(cfg.secrets)
+        client = (
+            google_auth.read_client_file(Path(args.client_json))
+            if args.client_json
+            else google_auth.stored_client_config(name)
+        )
+    except (ConfigError, google_auth.GoogleAuthError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print(f"dry-run: would sign in to Google and store the result in keyring entry {name!r}")
+        return 0
+
+    # A running cuecal keeps the old target and would write back the mirror cursors that a
+    # target switch resets.
+    instance_lock = lock.SingleInstanceLock()
+    if not instance_lock.acquire():
+        print(
+            "error: cuecal is running; stop it before `cuecal auth google`, then start it again",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        return _sign_in_and_set_target(args, cfg, name, client, path)
+    finally:
+        instance_lock.release()
+
+
+def _sign_in_and_set_target(
+    args: argparse.Namespace, cfg: Config, name: str, client: dict[str, Any], path: Path
+) -> int:
+    try:
+        creds = google_auth.sign_in(client)
+    except google_auth.GoogleAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    previous = secrets.get_secret(name)
+    secrets.set_secret(name, creds.to_json())
+    print(f"stored Google sign-in in keyring entry {name!r}")
+
+    if not _set_target_calendar(args, cfg, name, path):
+        # A new account paired with the old target could write invites to the wrong calendar.
+        if previous is None:
+            secrets.delete_secret(name)
+        else:
+            secrets.set_secret(name, previous)
+        print("the new Google sign-in was not kept", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _set_target_calendar(args: argparse.Namespace, cfg: Config, name: str, path: Path) -> bool:
+    calendar_id = args.calendar or _pick_calendar(cfg, name)
+    if not calendar_id:
+        return False
+    try:
+        current = path.read_text(encoding="utf-8") if path.exists() else DEFAULT_CONFIG_TOML
+        text = set_target_calendar(current, calendar_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except (ConfigError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return False
+    print(f"set mirror.target_calendar = {calendar_id!r} in {path}")
+    if calendar_id != cfg.mirror.target_calendar:
+        _restart_mirror_sync(cfg)
+    return True
+
+
+def _restart_mirror_sync(cfg: Config) -> None:
+    # Incremental sync tokens would skip unedited in-window events on the new target.
+    if paths.db_path().exists():
+        conn = db.connect(paths.db_path())
+        try:
+            reset_sync_cursors(conn)
+        finally:
+            conn.close()
+    if cfg.mirror.source_calendars:
+        print(
+            f"mirrors already on {cfg.mirror.target_calendar!r} stay there and stop updating; "
+            "delete them in Google Calendar if you no longer want them"
+        )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -220,7 +371,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             sink_plugin = None
             try:
-                sink_plugin = registry.get("sinks", cfg.sink)
+                sink_plugin = _sink(cfg, cfg.sink)
             except KeyError:
                 logger.warning("sink %r not found; skipping sink writes", cfg.sink)
             sink_inst = None
@@ -258,6 +409,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     if source_name == "gmail":
                         sources.append(
                             cls(
+                                secret_ref=cfg.secrets.get("google"),
                                 query=cfg.gmail.query,
                                 lookback_days=cfg.gmail.lookback_days,
                                 fetch_limit=cfg.gmail.fetch_limit,
@@ -275,17 +427,27 @@ def cmd_run(args: argparse.Namespace) -> int:
                         sources.append(cls())
 
             sink_failures: list[str] = []
+            auth_failures: list[str] = []
             while True:
                 credentials_reported = False
                 if secondaries and not args.dry_run:
                     fanout.retry_failed(conn, secondaries)
 
                 if mirror_source is not None:
-                    _sync_mirrors(conn, mirror_source, dry_run=args.dry_run)
+                    try:
+                        _sync_mirrors(conn, mirror_source, dry_run=args.dry_run)
+                    except SinkCredentialsError as exc:
+                        logger.error("calendar mirroring skipped: %s", exc)
+                        auth_failures.append(f"calendar: {exc}")
 
                 for source in sources:
                     cursor = db.get_cursor(conn, source.name)
-                    messages, next_cursor = source.fetch_since(cursor)
+                    try:
+                        messages, next_cursor = source.fetch_since(cursor)
+                    except (google_auth.GoogleAuthError, GmailNotAuthorizedError) as exc:
+                        logger.error("source %r skipped: %s", source.name, exc)
+                        auth_failures.append(f"{source.name}: {exc}")
+                        continue
 
                     for msg in messages:
                         if db.is_seen(conn, msg.source, msg.id):
@@ -460,12 +622,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 logger.info("sleeping for %d seconds", cfg.poll_interval_seconds)
                 time.sleep(cfg.poll_interval_seconds)
 
+            errors = list(auth_failures)
             if sink_failures:
-                summary = (
+                errors.append(
                     f"{len(sink_failures)} candidate(s) queued after sink {cfg.sink!r} failed: "
                     f"{sink_failures[-1]}"
                 )
-                db.record_run_finish(conn, run_id, status="error", error=summary)
+            if errors:
+                db.record_run_finish(conn, run_id, status="error", error="; ".join(errors))
                 conn.close()
                 return 1
             db.record_run_finish(conn, run_id, status="success")
@@ -534,7 +698,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
         sink_plugin = None
         try:
-            sink_plugin = registry.get("sinks", cfg.sink)
+            sink_plugin = _sink(cfg, cfg.sink)
         except KeyError:
             print(f"error: sink {cfg.sink!r} not found", file=sys.stderr)
             return 1
@@ -674,7 +838,7 @@ def cmd_edit(args: argparse.Namespace) -> int:
             cfg = load_config(paths.config_path())
             sink_plugin = None
             try:
-                sink_plugin = registry.get("sinks", cfg.sink)
+                sink_plugin = _sink(cfg, cfg.sink)
             except KeyError:
                 print(f"error: sink {cfg.sink!r} not found", file=sys.stderr)
                 return 1
@@ -852,10 +1016,10 @@ def cmd_missed(args: argparse.Namespace) -> int:
         conn.close()
 
 
-def _doctor_check_sink(name: str) -> bool:
+def _doctor_check_sink(cfg: Config, name: str) -> bool:
     """Print one sink credential status line and return whether it is ready."""
     try:
-        plugin = registry.get("sinks", name)
+        plugin = _sink(cfg, name)
     except KeyError:
         print(f"sink {name}: not registered")
         return False
@@ -913,7 +1077,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     ok = False
                     print(f"source {source_name}: mapping load failed ({exc})")
         for sink_name in (cfg.sink, *cfg.secondary_sinks):
-            if not _doctor_check_sink(sink_name):
+            if not _doctor_check_sink(cfg, sink_name):
                 ok = False
         if cfg.llm.paid is not None:
             problem = paid_key_problem(cfg)
@@ -999,8 +1163,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("auth", parents=[common], help="store credentials for a provider")
-    p.add_argument("provider")
-    p.add_argument("--token", help="token to store directly instead of prompting")
+    p.add_argument("provider", help="slack or google")
+    p.add_argument("--token", help="slack: token to store directly instead of prompting")
+    p.add_argument(
+        "--client-json",
+        metavar="PATH",
+        help="google: Desktop app OAuth client JSON; omit to reuse the stored client",
+    )
+    p.add_argument(
+        "--calendar", metavar="ID", help="google: calendar to write to, skipping the picker"
+    )
     p.set_defaults(func=cmd_auth)
 
     p = sub.add_parser("run", parents=[common], help="poll sources and create events")
@@ -1085,7 +1257,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.entry_point_errors = registry.load_entry_points()
     for kind, name, exc in args.entry_point_errors:
         logger.warning("failed to load %s plugin %r: %r", kind, name, exc)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (google_auth.GoogleAuthError, SinkCredentialsError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

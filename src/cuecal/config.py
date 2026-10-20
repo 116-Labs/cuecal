@@ -5,6 +5,8 @@ The config holds only secret *references* (keyring entry names), never tokens.
 
 from __future__ import annotations
 
+import json
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +59,7 @@ auto_create = 0.85
 # Mirror secondary calendars into the target calendar: add "calendar" to `sources` and pick
 # calendar IDs from `cuecal mirror calendars`.
 # [mirror]
-# With the google-calendar sink the target must be "primary" (or mirror.self_email).
+# The calendar the google-calendar sink and mirrors write to; `cuecal auth google` sets it.
 # target_calendar = "primary"
 # source_calendars = []
 # lookahead_days = 14
@@ -82,7 +84,8 @@ _PAID_PROVIDERS = ("anthropic", "openai")
 _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _TRANSPARENCIES = ("opaque", "transparent")
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
-GOOGLE_SINK = "google-calendar"
+_TABLE_HEADER = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$")
+_TARGET_KEY = re.compile(r"^\s*target_calendar\s*=")
 
 
 class ConfigError(ValueError):
@@ -315,7 +318,6 @@ def parse_config(data: dict[str, Any]) -> Config:
     )
 
     cfg.mirror = _parse_mirror(data)
-    _check_mirror_target(cfg)
     cfg.llm = _parse_llm(data, cfg.secrets)
     return cfg
 
@@ -452,20 +454,6 @@ def _parse_llm_paid(llm: dict[str, Any], secrets: dict[str, str]) -> PaidLLMConf
     )
 
 
-def _check_mirror_target(cfg: Config) -> None:
-    """The Google sink writes to the primary calendar; mirrors must land there too (#10 dedupe)."""
-    if GOOGLE_SINK not in (cfg.sink, *cfg.secondary_sinks):
-        return
-    target = cfg.mirror.target_calendar.lower()
-    if target == "primary" or (cfg.mirror.self_email and target == cfg.mirror.self_email.lower()):
-        return
-    raise ConfigError(
-        f"mirror.target_calendar {cfg.mirror.target_calendar!r} must be the primary calendar "
-        f"while the {GOOGLE_SINK!r} sink is used: that sink writes to 'primary', and dedupe "
-        "between mirrors and invites only looks in one calendar"
-    )
-
-
 def _parse_mirror(data: dict[str, Any]) -> MirrorConfig:
     default = MirrorConfig()
     mirror = _table(
@@ -534,6 +522,40 @@ def load_config(path: Path) -> Config:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
     return parse_config(data)
+
+
+def set_target_calendar(text: str, calendar_id: str) -> str:
+    """Return ``text`` with ``[mirror] target_calendar`` set, every other line kept as is.
+
+    Raises ConfigError when the edited config would not load, e.g. the target is also a source.
+    """
+    line = f"target_calendar = {json.dumps(calendar_id)}\n"
+    lines = text.splitlines(keepends=True)
+    header = next(
+        (i for i, raw in enumerate(lines) if (m := _TABLE_HEADER.match(raw)) and m[1] == "mirror"),
+        None,
+    )
+    if header is None:
+        prefix = text if not text or text.endswith("\n") else text + "\n"
+        edited = f"{prefix}\n[mirror]\n{line}"
+    else:
+        end = next(
+            (i for i in range(header + 1, len(lines)) if _TABLE_HEADER.match(lines[i])),
+            len(lines),
+        )
+        key = next((i for i in range(header + 1, end) if _TARGET_KEY.match(lines[i])), None)
+        if key is None:
+            lines.insert(header + 1, line)
+        else:
+            lines[key] = line
+        edited = "".join(lines)
+    try:
+        cfg = parse_config(tomllib.loads(edited))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"cannot set mirror.target_calendar automatically: {exc}") from exc
+    if cfg.mirror.target_calendar != calendar_id:
+        raise ConfigError("cannot set mirror.target_calendar automatically; edit the config")
+    return edited
 
 
 def write_default_config(path: Path, *, force: bool = False) -> bool:

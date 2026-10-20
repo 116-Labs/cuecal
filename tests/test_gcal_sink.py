@@ -85,35 +85,27 @@ def test_sink_protocol_compliance():
     assert mock_ev.id == "test"
 
 
-def test_token_resolution(monkeypatch):
-    """Test token resolution via explicit provider, secret_ref, and default google keyring."""
-    # Explicit string token
-    sink1 = GoogleCalendarSink(token_provider="token-123")
-    assert sink1._get_token() == "token-123"
+def test_injected_token_provider_wins_over_stored_credentials(monkeypatch):
+    def no_keyring(ref):
+        raise AssertionError("keyring read despite an injected token")
 
-    # Callable provider
-    sink2 = GoogleCalendarSink(token_provider=lambda: "callable-token")
-    assert sink2._get_token() == "callable-token"
+    monkeypatch.setattr(secrets, "get_secret", no_keyring)
+    assert GoogleCalendarSink(token_provider="token-123")._access_token() == "token-123"
+    assert GoogleCalendarSink(token_provider=lambda: "callable")._access_token() == "callable"
 
-    # Keyring secret_ref
-    monkeypatch.setattr(
-        secrets, "get_secret", lambda ref: "custom-token" if ref == "my-gcal" else None
-    )
-    sink3 = GoogleCalendarSink(secret_ref="my-gcal")
-    assert sink3._get_token() == "custom-token"
 
-    # Keyring JSON credentials
-    json_creds = json.dumps({"access_token": "ya29.oauth-token", "token_type": "Bearer"})
-    monkeypatch.setattr(
-        secrets, "get_secret", lambda ref: json_creds if ref == "google" else None
-    )
-    sink4 = GoogleCalendarSink()
-    assert sink4._get_token() == "ya29.oauth-token"
+def test_sink_reads_tokens_through_shared_google_helper(monkeypatch):
+    refs = []
 
-    # Fallback to empty string when not found
-    monkeypatch.setattr(secrets, "get_secret", lambda ref: None)
-    sink5 = GoogleCalendarSink()
-    assert sink5._get_token() == ""
+    def fake_get_access_token(name):
+        refs.append(name)
+        return f"token-from-{name}"
+
+    monkeypatch.setattr("cuecal.google_auth.get_access_token", fake_get_access_token)
+    assert GoogleCalendarSink()._access_token() == "token-from-google"
+    assert GoogleCalendarSink(secret_ref="my-gcal")._access_token() == "token-from-my-gcal"
+    assert refs == ["google", "my-gcal"]
+    assert not hasattr(GoogleCalendarSink, "_get_token")
 
 
 def test_candidate_to_event_body(sample_candidate):
@@ -504,7 +496,7 @@ def test_request_without_token_raises_before_sending(monkeypatch):
     monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: None)
     sink = GoogleCalendarSink()
 
-    with pytest.raises(SinkCredentialsError, match='keyring entry "google"'):
+    with pytest.raises(SinkCredentialsError, match="cuecal auth google"):
         sink.check_credentials()
     with pytest.raises(SinkCredentialsError, match="google-calendar sink has no credentials"):
         sink.find_by_meeting_id("mtg1")

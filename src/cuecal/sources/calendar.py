@@ -28,7 +28,9 @@ from dateutil import parser as dateparser
 from cuecal import db
 from cuecal.conference import MIRROR_PROPERTY, event_conference_uris, event_meeting_ids
 from cuecal.config import MirrorConfig
+from cuecal.google_auth import SCOPE_CALENDAR_LIST, SCOPE_EVENTS
 from cuecal.models import Message
+from cuecal.sinks.base import SinkCredentialsError
 from cuecal.sinks.google import SAME_MEETING_WINDOW, GoogleCalendarSink
 
 logger = logging.getLogger("cuecal.sources.calendar")
@@ -37,13 +39,8 @@ MIRROR_OF = "cuecalMirrorOf"
 MEETING_ID = "cuecalMeetingId"
 SOURCE_UPDATED = "cuecalSourceUpdated"
 
-SCOPE_EVENTS = "https://www.googleapis.com/auth/calendar.events"
-SCOPE_CALENDAR_LIST = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
-# The scopes ADR 0005 grants. `calendar.events` reads events on every calendar the user can
-# access, so mirroring needs nothing beyond them.
-GOOGLE_SCOPES = (SCOPE_EVENTS, SCOPE_CALENDAR_LIST)
-
 FREE_BUSY_ROLE = "freeBusyReader"
+WRITABLE_ROLES = ("owner", "writer")
 _NO_EMAIL = {"sendUpdates": "none"}
 
 
@@ -64,6 +61,12 @@ def window_cursor_key(calendar_id: str) -> str:
     return f"calendar-window:{calendar_id}"
 
 
+def reset_sync_cursors(conn: sqlite3.Connection) -> None:
+    """Forget every source calendar's sync position, so the next sync relists the window."""
+    db.delete_cursors(conn, token_cursor_key(""))
+    db.delete_cursors(conn, window_cursor_key(""))
+
+
 @dataclass(frozen=True)
 class CalendarInfo:
     id: str
@@ -74,6 +77,10 @@ class CalendarInfo:
     @property
     def free_busy_only(self) -> bool:
         return self.access_role == FREE_BUSY_ROLE
+
+    @property
+    def writable(self) -> bool:
+        return self.access_role in WRITABLE_ROLES
 
 
 @dataclass(frozen=True)
@@ -324,6 +331,15 @@ class CalendarSource:
         primary = next((c for c in self.list_calendars() if c.primary), None)
         return primary.id.lower() if primary and "@" in primary.id else None
 
+    def primary_target_email(self) -> str | None:
+        """The account email when the target is its primary calendar, else None.
+
+        An invite to that email already sits on the primary calendar only, and inviting it to
+        a mirror on another calendar would put a second copy there.
+        """
+        email = self.self_email()
+        return email if email and email in self.target_ids() else None
+
     def target_ids(self) -> set[str]:
         """Lower-cased IDs naming the target calendar ("primary" and its account email)."""
         target = self.cfg.target_calendar.lower()
@@ -351,10 +367,15 @@ class CalendarSource:
     # -- Sync -----------------------------------------------------------------------------
 
     def sync(self, conn: sqlite3.Connection, *, dry_run: bool = False) -> list[MirrorOp]:
-        """Mirror every configured source calendar. Under ``dry_run`` nothing is written."""
+        """Mirror every configured source calendar. Under ``dry_run`` nothing is written.
+
+        Raises SinkCredentialsError when there is no usable sign-in; other failures only warn.
+        """
         try:
             warnings = self.source_warnings()
             known = {c.id: c for c in self.list_calendars()}
+        except SinkCredentialsError:
+            raise
         except Exception as exc:  # noqa: BLE001 - mirroring must not stop the other sources
             logger.warning("reading the calendar list failed; skipping mirroring: %s", exc)
             return []
@@ -505,7 +526,7 @@ class CalendarSource:
                 self._request("DELETE", self._target_path(mirror["id"]), params=dict(_NO_EMAIL))
             return op
 
-        email = self.self_email()
+        email = self.primary_target_email()
         reason = skip_reason(
             event, self_email=email, include_transparent=self.cfg.include_transparent
         )

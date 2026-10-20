@@ -58,7 +58,7 @@ def test_main_registers_entry_point_plugins_before_non_doctor_command(monkeypatc
 def test_doctor_reports_paths_backend_and_plugins(tmp_path, monkeypatch, capsys):
     registry.register("sinks", "ics", object())
     monkeypatch.setattr(
-        "cuecal.secrets.get_secret", lambda ref: "token" if ref == "google" else None
+        "cuecal.google_auth.get_access_token", lambda name: "token" if name == "google" else ""
     )
     assert cli.main(["init"]) == 0
     capsys.readouterr()
@@ -153,7 +153,7 @@ def test_init_creates_config_and_db(tmp_path):
 
 
 def test_stub_commands_exit_nonzero(capsys):
-    assert cli.main(["auth", "google"]) == 2
+    assert cli.main(["auth", "zoho"]) == 2
     assert "not implemented" in capsys.readouterr().err
 
 

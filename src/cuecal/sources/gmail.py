@@ -18,13 +18,21 @@ from typing import Any
 
 from dateutil import parser as dateparser
 
-from cuecal import __version__, secrets
+from cuecal import __version__, google_auth
 from cuecal.models import Message
 
 logger = logging.getLogger("cuecal.sources.gmail")
 
 DEFAULT_GMAIL_QUERY = ""
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
+
+
+class GmailNotAuthorizedError(RuntimeError):
+    """Raised when the stored Google sign-in carries no Gmail scope."""
+
+
+# Swallowing these per message would let the history cursor advance past unfetched messages.
+_AUTH_ERRORS = (google_auth.GoogleAuthError, GmailNotAuthorizedError)
 
 
 class _HTMLToText(HTMLParser):
@@ -251,6 +259,16 @@ def matches_query(message_data: dict[str, Any], query: str | None) -> bool:
     return False
 
 
+def _scope_insufficient(err: urllib.error.HTTPError) -> bool:
+    """A 403 for a token without the Gmail scope, as opposed to a 403 rate limit."""
+    try:
+        body = (err.read() or b"").decode("utf-8", "replace")
+    except (OSError, AttributeError):
+        body = ""
+    challenge = (err.headers or {}).get("WWW-Authenticate") or ""
+    return "insufficient" in f"{body} {challenge}".lower()
+
+
 class GmailSource:
     """Gmail native source adapter implementing the Source protocol."""
 
@@ -277,27 +295,6 @@ class GmailSource:
         self.fetch_limit = fetch_limit
         self.latency_budget_seconds = latency_budget_seconds
 
-    def _get_token(self) -> str:
-        if callable(self.token_provider):
-            return self.token_provider()
-        if isinstance(self.token_provider, str):
-            return self.token_provider
-        if self.secret_ref:
-            token = secrets.get_secret(self.secret_ref)
-            if token:
-                return token
-        token = secrets.get_secret("google")
-        if token:
-            # If stored as JSON credentials
-            if token.startswith("{"):
-                try:
-                    data = json.loads(token)
-                    return data.get("access_token") or data.get("token") or token
-                except json.JSONDecodeError:
-                    pass
-            return token
-        return ""
-
     def _request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._http_client is not None:
             if hasattr(self._http_client, "get"):
@@ -305,13 +302,12 @@ class GmailSource:
             if callable(self._http_client):
                 return self._http_client("GET", path, params=params)
 
-        token = self._get_token()
+        token = google_auth.resolve_token(self.token_provider, self.secret_ref)
         headers = {
             "Accept": "application/json",
             "User-Agent": f"cuecal/{__version__}",
+            "Authorization": f"Bearer {token}",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
         url = f"{GMAIL_API_BASE}{path}"
         if params:
@@ -331,6 +327,11 @@ class GmailSource:
                 logger.warning(
                     "Gmail API rate limited (%d), Retry-After: %s", err.code, retry_after
                 )
+            if err.code == 403 and _scope_insufficient(err):
+                raise GmailNotAuthorizedError(
+                    "Gmail not authorized: the Google sign-in from `cuecal auth google` grants "
+                    "Calendar access only; Gmail sign-in is not available yet"
+                ) from err
             raise
 
     def _fetch_initial(self, limit: int | None = None) -> tuple[list[Message], str]:
@@ -377,6 +378,8 @@ class GmailSource:
                 if h_id > max_history_id:
                     max_history_id = h_id
                 messages.append(parse_gmail_message(msg_data))
+            except _AUTH_ERRORS:
+                raise
             except Exception as exc:
                 logger.warning("Failed to fetch Gmail message %s: %s", msg_id, exc)
 
@@ -457,6 +460,8 @@ class GmailSource:
                     )
                     if matches_query(msg_data, self.query):
                         messages.append(parse_gmail_message(msg_data))
+                except _AUTH_ERRORS:
+                    raise
                 except Exception as exc:
                     logger.warning("Failed to fetch Gmail message %s: %s", msg_id, exc)
 

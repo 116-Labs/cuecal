@@ -1,17 +1,20 @@
 import base64
+import io
 import json
 import urllib.error
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
-from cuecal import secrets
+from cuecal import google_auth
 from cuecal.config import ConfigError, parse_config
 from cuecal.extract import extract
 from cuecal.sources import GmailSource, Source
 from cuecal.sources.gmail import (
     DEFAULT_GMAIL_QUERY,
+    GmailNotAuthorizedError,
     html_to_text,
     matches_query,
     parse_gmail_message,
@@ -422,29 +425,81 @@ def test_configurable_narrowing_query(mock_gmail_api):
     assert f"({custom_query})" in messages_call["q"]
 
 
-def test_auth_token_resolution(monkeypatch):
+def _capture_gmail_auth(monkeypatch) -> list[str | None]:
+    seen: list[str | None] = []
+
+    def fake_urlopen(req, *args, **kwargs):
+        seen.append(req.headers.get("Authorization"))
+        resp = MagicMock()
+        resp.read.return_value = b"{}"
+        resp.__enter__.return_value = resp
+        return resp
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return seen
+
+
+def test_gmail_reads_tokens_through_shared_google_helper(monkeypatch):
+    seen = _capture_gmail_auth(monkeypatch)
     monkeypatch.setattr(
-        secrets,
-        "get_secret",
-        lambda ref: "stored-secret-token" if ref == "google" else None,
+        "cuecal.google_auth.get_access_token", lambda name: f"token-from-{name}"
     )
+    GmailSource()._request("/users/me/profile")
+    GmailSource(secret_ref="mail")._request("/users/me/profile")
+    GmailSource(token_provider=lambda: "dynamic-token")._request("/users/me/profile")
+    GmailSource(token_provider="raw-token-123")._request("/users/me/profile")
+    assert seen == [
+        "Bearer token-from-google",
+        "Bearer token-from-mail",
+        "Bearer dynamic-token",
+        "Bearer raw-token-123",
+    ]
+    assert not hasattr(GmailSource, "_get_token")
 
-    source_default = GmailSource()
-    assert source_default._get_token() == "stored-secret-token"
 
-    source_provider = GmailSource(token_provider=lambda: "dynamic-token")
-    assert source_provider._get_token() == "dynamic-token"
+def test_gmail_403_without_gmail_scope_raises_not_authorized(monkeypatch):
+    body = json.dumps(
+        {"error": {"code": 403, "message": "Request had insufficient authentication scopes."}}
+    ).encode()
 
-    source_string = GmailSource(token_provider="raw-token-123")
-    assert source_string._get_token() == "raw-token-123"
+    def forbidden(req, *args, **kwargs):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(body))
 
-    monkeypatch.setattr(
-        secrets,
-        "get_secret",
-        lambda ref: json.dumps({"access_token": "json-access-token"}) if ref == "google" else None,
-    )
-    source_json = GmailSource()
-    assert source_json._get_token() == "json-access-token"
+    monkeypatch.setattr("urllib.request.urlopen", forbidden)
+    with pytest.raises(GmailNotAuthorizedError, match="Gmail not authorized"):
+        GmailSource(token_provider="calendar-only").fetch_since(None)
+
+
+def test_gmail_403_rate_limit_stays_an_http_error(monkeypatch):
+    body = b'{"error": {"code": 403, "errors": [{"reason": "rateLimitExceeded"}]}}'
+
+    def forbidden(req, *args, **kwargs):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(body))
+
+    monkeypatch.setattr("urllib.request.urlopen", forbidden)
+    with pytest.raises(urllib.error.HTTPError):
+        GmailSource(token_provider="t").fetch_since(None)
+
+
+@pytest.mark.parametrize(
+    ("cursor", "message_path"),
+    [(None, "/users/me/messages/msg_html_zoom"), ("100500", "/users/me/messages/msg_new_teams")],
+)
+@pytest.mark.parametrize(
+    "error",
+    [
+        GmailNotAuthorizedError("Gmail not authorized"),
+        google_auth.GoogleAuthError("Google refused to refresh the stored sign-in"),
+    ],
+)
+def test_auth_error_on_a_message_fetch_propagates_instead_of_advancing_the_cursor(
+    mock_gmail_api, cursor, message_path, error
+):
+    client, _ = mock_gmail_api
+    client.responses[message_path] = error
+    source = GmailSource(token_provider="dummy-token", http_client=client)
+    with pytest.raises(type(error)):
+        source.fetch_since(cursor)
 
 
 def test_config_gmail_section_parsing():

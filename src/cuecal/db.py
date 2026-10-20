@@ -391,6 +391,14 @@ def set_cursor(conn: sqlite3.Connection, source_name: str, cursor: str) -> None:
     conn.commit()
 
 
+def delete_cursors(conn: sqlite3.Connection, prefix: str) -> None:
+    # substr, not LIKE: calendar IDs may hold "_" or "%".
+    conn.execute(
+        "DELETE FROM source_cursor WHERE substr(source, 1, ?) = ?", (len(prefix), prefix)
+    )
+    conn.commit()
+
+
 def is_seen(conn: sqlite3.Connection, source: str, message_id: str) -> bool:
     if not message_id:
         return False
