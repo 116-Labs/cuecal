@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import getpass
 import json
 import logging
 import re
@@ -226,7 +227,7 @@ def cmd_auth(args: argparse.Namespace) -> int:
         token = getattr(args, "token", None)
         if not token:
             try:
-                token = input("Slack user token (xoxp-...): ").strip()
+                token = getpass.getpass("Slack user token (xoxp-...): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nauth cancelled", file=sys.stderr)
                 return 1
