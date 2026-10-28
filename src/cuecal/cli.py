@@ -492,15 +492,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                                 db.mark_seen(conn, msg.source, msg.id)
                             continue
 
-                        # Ahead of escalation, so no LLM tokens go to an already-linked meeting.
-                        if cand.meeting_id and db.is_duplicate(conn, cand.meeting_id, cfg.sink):
-                            logger.info(
-                                "skipped duplicate meeting %r from %s", cand.title, msg.source
-                            )
-                            if not args.dry_run:
-                                db.mark_seen(conn, msg.source, msg.id)
-                            continue
-
                         outcome = escalator.process(msg, cand, base_latency_ms=extract_ms)
                         cand = outcome.candidate
 

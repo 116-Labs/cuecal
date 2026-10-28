@@ -127,6 +127,45 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     """,
+    """
+    ALTER TABLE event_link RENAME TO event_link_v8;
+    CREATE TABLE event_link (
+        meeting_id TEXT NOT NULL,
+        sink TEXT NOT NULL,
+        sink_event_id TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (meeting_id, sink, sink_event_id)
+    );
+    INSERT INTO event_link (meeting_id, sink, sink_event_id, created_at)
+        SELECT meeting_id, sink, sink_event_id, created_at FROM event_link_v8;
+    DROP TABLE event_link_v8;
+
+    ALTER TABLE sink_delivery RENAME TO sink_delivery_v8;
+    CREATE TABLE sink_delivery (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id TEXT,
+        sink TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'secondary',
+        candidate_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        sink_event_id TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        instance_key TEXT NOT NULL DEFAULT '',
+        UNIQUE (meeting_id, sink, instance_key)
+    );
+    INSERT INTO sink_delivery (
+        id, meeting_id, sink, role, candidate_json, status, sink_event_id,
+        attempts, last_attempt_at, error_message, created_at, instance_key
+    )
+        SELECT id, meeting_id, sink, role, candidate_json, status, sink_event_id,
+            attempts, last_attempt_at, error_message, created_at,
+            CASE WHEN role = 'primary' AND sink_event_id IS NOT NULL THEN sink_event_id ELSE '' END
+        FROM sink_delivery_v8;
+    DROP TABLE sink_delivery_v8;
+    """,
 ]
 
 SINK_DELIVERY_STATUSES = ("pending", "synced", "failed")
@@ -142,6 +181,7 @@ _SINK_DELIVERY_COLUMNS = (
     "last_attempt_at",
     "error_message",
     "created_at",
+    "instance_key",
 )
 
 
@@ -430,16 +470,27 @@ def record_event_link(
     conn: sqlite3.Connection, meeting_id: str, sink_name: str, sink_event_id: str
 ) -> None:
     conn.execute(
-        "INSERT INTO event_link (meeting_id, sink, sink_event_id) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO event_link (meeting_id, sink, sink_event_id) VALUES (?, ?, ?)",
         (meeting_id, sink_name, sink_event_id),
     )
     conn.commit()
 
 
+def has_event_link(
+    conn: sqlite3.Connection, meeting_id: str, sink_name: str, sink_event_id: str
+) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM event_link WHERE meeting_id = ? AND sink = ? AND sink_event_id = ?",
+        (meeting_id, sink_name, sink_event_id),
+    ).fetchone()
+    return row is not None
+
+
 def get_event_link(conn: sqlite3.Connection, meeting_id: str, sink_name: str) -> str | None:
     """Return the sink's event ID for this meeting, if one was recorded."""
     row = conn.execute(
-        "SELECT sink_event_id FROM event_link WHERE meeting_id = ? AND sink = ?",
+        "SELECT sink_event_id FROM event_link WHERE meeting_id = ? AND sink = ? "
+        "ORDER BY rowid LIMIT 1",
         (meeting_id, sink_name),
     ).fetchone()
     return row[0] if row else None
@@ -472,23 +523,25 @@ def add_sink_delivery(
     candidate_json: str,
     meeting_id: str | None = None,
     role: str = "secondary",
+    instance_key: str = "",
 ) -> int:
-    """Track a write to one sink. A known (meeting_id, sink) keeps its row and status."""
+    """Track a sink write; primary event IDs separate instances, secondaries stay series-level."""
     cursor = conn.execute(
         """
-        INSERT INTO sink_delivery (meeting_id, sink, role, candidate_json)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(meeting_id, sink) DO UPDATE SET
+        INSERT INTO sink_delivery (meeting_id, sink, role, candidate_json, instance_key)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(meeting_id, sink, instance_key) DO UPDATE SET
             role = excluded.role,
             candidate_json = excluded.candidate_json
         """,
-        (meeting_id, sink, role, candidate_json),
+        (meeting_id, sink, role, candidate_json, instance_key),
     )
     conn.commit()
     if meeting_id is None:
         return int(cursor.lastrowid)
     row = conn.execute(
-        "SELECT id FROM sink_delivery WHERE meeting_id = ? AND sink = ?", (meeting_id, sink)
+        "SELECT id FROM sink_delivery WHERE meeting_id = ? AND sink = ? AND instance_key = ?",
+        (meeting_id, sink, instance_key),
     ).fetchone()
     return int(row[0])
 

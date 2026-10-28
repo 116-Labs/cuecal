@@ -65,6 +65,57 @@ def test_primary_then_secondaries_all_synced(conn):
     assert db.is_duplicate(conn, "mtg1", "zoho")
 
 
+def test_primary_instances_keep_links_and_secondary_stays_series_level_issue_12(conn):
+    calls = []
+
+    class InstanceSink:
+        def __init__(self):
+            self.events = []
+
+        def create(self, candidate):
+            event = SinkEvent(
+                id=f"google-{len(self.events) + 1}",
+                title=candidate.title,
+                start=candidate.start,
+                end=candidate.end,
+            )
+            self.events.append(event)
+            return event
+
+    primary = InstanceSink()
+    secondary = RecordingSink("zoho", calls)
+    first_start = datetime(2030, 1, 1, 15, tzinfo=UTC)
+    second_start = first_start + timedelta(days=7)
+    for start in (first_start, second_start):
+        candidate = MeetingCandidate(
+            title="Sync",
+            confidence=0.9,
+            meeting_id="mtg1",
+            start=start,
+            end=start + timedelta(minutes=30),
+        )
+        fanout.deliver(
+            conn,
+            candidate,
+            primary_name="google-calendar",
+            primary=primary,
+            secondaries={"zoho": secondary},
+        )
+
+    assert [event.id for event in primary.events] == ["google-1", "google-2"]
+    assert db.has_event_link(conn, "mtg1", "google-calendar", "google-1")
+    assert db.has_event_link(conn, "mtg1", "google-calendar", "google-2")
+    assert db.get_event_link(conn, "mtg1", "google-calendar") == "google-1"
+    rows = db.list_sink_deliveries(conn)
+    assert [(row["sink"], row["sink_event_id"]) for row in rows] == [
+        ("google-calendar", "google-1"),
+        ("zoho", "zoho-evt"),
+        ("google-calendar", "google-2"),
+    ]
+    assert MeetingCandidate.from_json(rows[1]["candidate_json"]).start == first_start
+    assert calls == [("zoho", "create", "mtg1")]
+
+
 def test_secondary_failure_recorded_and_primary_kept(conn):
     calls = []
     event_id = fanout.deliver(
