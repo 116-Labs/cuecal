@@ -586,44 +586,136 @@ def test_cli_run_dry_run_does_not_record_seen_messages(tmp_path, monkeypatch):
     assert not db.is_seen(conn, "dummy", "msg1")
 
 
-def _run_duplicate_meeting_message(tmp_path, monkeypatch, argv):
-    from datetime import datetime
+def test_cli_run_creates_later_instance_without_changing_earlier_event(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from cuecal.models import MeetingCandidate, Message
+    from cuecal.sinks.base import SinkEvent
+
+    assert cli.main(["init"]) == 0
+    conn = db.connect(tmp_path / "state.db")
+    db.record_event_link(conn, "mtg1", "google-calendar", "event-earlier")
+    delivery_id = db.add_sink_delivery(
+        conn,
+        sink="google-calendar",
+        candidate_json="{}",
+        meeting_id="mtg1",
+        role="primary",
+        instance_key="event-earlier",
+    )
+    db.record_sink_attempt(conn, delivery_id, status="synced", sink_event_id="event-earlier")
+    earlier_start = datetime(2030, 1, 1, 15, tzinfo=UTC)
+    earlier = SinkEvent(
+        id="event-earlier",
+        title="Weekly sync",
+        start=earlier_start,
+        end=earlier_start + timedelta(minutes=30),
+        meeting_id="mtg1",
+    )
+
+    class Sink:
+        name = "google-calendar"
+
+        def __init__(self):
+            self.events = [earlier]
+
+        def busy(self, start, end):
+            return [event for event in self.events if event.start < end and event.end > start]
+
+        def create(self, candidate):
+            existing = next(
+                (
+                    event
+                    for event in self.events
+                    if event.meeting_id == candidate.meeting_id
+                    and abs((event.start - candidate.start).total_seconds()) <= 900
+                ),
+                None,
+            )
+            if existing:
+                return existing
+            event = SinkEvent(
+                id=f"event-{len(self.events) + 1}",
+                title=candidate.title,
+                start=candidate.start,
+                end=candidate.end,
+                meeting_id=candidate.meeting_id,
+            )
+            self.events.append(event)
+            return event
+
+    sink = Sink()
+    messages = [
+        Message(id=message_id, source="dummy", sender="a", ts=earlier_start, text="x")
+        for message_id in ("msg_later", "msg_repost")
+    ]
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source(messages) if kind == "sources" else sink,
+    )
+    later = MeetingCandidate(
+        confidence=0.95,
+        meeting_id="mtg1",
+        title="Weekly sync",
+        start=earlier_start + timedelta(days=7),
+        end=earlier_start + timedelta(days=7, minutes=30),
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda message: later
+        if message.id == "msg_later"
+        else MeetingCandidate(
+            confidence=0.95,
+            meeting_id="mtg1",
+            title="Weekly sync",
+            start=earlier_start + timedelta(days=7),
+            end=earlier_start + timedelta(days=7, minutes=30),
+        ),
+    )
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 0
+
+    assert [(event.id, event.start) for event in sink.events] == [
+        ("event-earlier", earlier_start),
+        ("event-2", earlier_start + timedelta(days=7)),
+    ]
+    assert sink.events[0] == earlier
+    assert db.has_event_link(conn, "mtg1", "google-calendar", "event-earlier")
+    assert db.has_event_link(conn, "mtg1", "google-calendar", "event-2")
+    assert len(db.list_sink_deliveries(conn, sink="google-calendar")) == 2
+
+
+def test_cli_run_queues_later_instance_for_approval_despite_existing_link(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
 
     from cuecal.models import MeetingCandidate, Message
 
     assert cli.main(["init"]) == 0
     conn = db.connect(tmp_path / "state.db")
-    db.record_event_link(conn, "mtg1", "google-calendar", "evt_existing")
-    msg = Message(id="msg_b", source="dummy", sender="a", ts=datetime.now(), text="x")
+    db.record_event_link(conn, "mtg1", "google-calendar", "event-earlier")
+    start = datetime(2030, 1, 8, 15, tzinfo=UTC)
+    msg = Message(id="msg_later", source="dummy", sender="a", ts=start, text="x")
     monkeypatch.setattr(
         "cuecal.cli.registry.get",
         lambda kind, name: _replaying_source([msg]) if kind == "sources" else object(),
     )
-    calls = []
-    _counting_extract(
-        monkeypatch, calls, MeetingCandidate(confidence=0.9, meeting_id="mtg1", title="T")
+    monkeypatch.setattr(
+        "cuecal.extract.extract",
+        lambda message: MeetingCandidate(
+            confidence=0.2,
+            meeting_id="mtg1",
+            title="Weekly sync",
+            start=start,
+            end=start + timedelta(minutes=30),
+        ),
     )
     _set_dummy_source(tmp_path / "config.toml")
 
-    assert cli.main(argv) == 0
-    assert cli.main(argv) == 0
-    return calls, conn
+    assert cli.main(["run", "--once"]) == 0
 
-
-def test_cli_run_does_not_reprocess_a_message_skipped_as_duplicate(tmp_path, monkeypatch):
-    calls, conn = _run_duplicate_meeting_message(tmp_path, monkeypatch, ["run", "--once"])
-
-    assert calls == ["msg_b"]
-    assert db.is_seen(conn, "dummy", "msg_b")
-
-
-def test_cli_run_dry_run_does_not_record_a_message_skipped_as_duplicate(tmp_path, monkeypatch):
-    calls, conn = _run_duplicate_meeting_message(
-        tmp_path, monkeypatch, ["run", "--once", "--dry-run"]
-    )
-
-    assert calls == ["msg_b", "msg_b"]
-    assert not db.is_seen(conn, "dummy", "msg_b")
+    rows = db.list_pending(conn)
+    assert [(row["message_id"], row["status"]) for row in rows] == [("msg_later", "pending")]
 
 
 def _run_calendar_matched_message(tmp_path, monkeypatch, argv):

@@ -46,7 +46,7 @@ def create_on_sink(sink: Any, c: MeetingCandidate) -> str:
 
 
 def _link(conn: sqlite3.Connection, c: MeetingCandidate, sink_name: str, event_id: str) -> None:
-    if c.meeting_id and not db.is_duplicate(conn, c.meeting_id, sink_name):
+    if c.meeting_id and not db.has_event_link(conn, c.meeting_id, sink_name, event_id):
         db.record_event_link(conn, c.meeting_id, sink_name, event_id)
 
 
@@ -102,6 +102,7 @@ def deliver(
         candidate_json=candidate_json,
         meeting_id=c.meeting_id,
         role="primary",
+        instance_key=event_id,
     )
     db.record_sink_attempt(conn, primary_id, status="synced", sink_event_id=event_id)
 

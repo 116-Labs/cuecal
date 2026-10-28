@@ -265,6 +265,52 @@ def test_migration_removes_pending_duplicates(tmp_path, monkeypatch):
     assert rows == [(1, "msg1"), (4, "msg2"), (5, ""), (6, "")]
 
 
+def test_instance_migration_preserves_existing_links_and_deliveries(tmp_path, monkeypatch):
+    conn = sqlite3.connect(tmp_path / "state.db")
+    monkeypatch.setattr(db, "MIGRATIONS", db.MIGRATIONS[:7])
+    assert db.migrate(conn) == 7
+    conn.execute(
+        "INSERT INTO event_link (meeting_id, sink, sink_event_id) VALUES (?, ?, ?)",
+        ("meeting", "google-calendar", "event-old"),
+    )
+    conn.execute(
+        "INSERT INTO sink_delivery (meeting_id, sink, role, candidate_json, sink_event_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("meeting", "google-calendar", "primary", '{"old":true}', "event-old"),
+    )
+    conn.commit()
+    delivery_id = conn.execute("SELECT id FROM sink_delivery").fetchone()[0]
+    monkeypatch.undo()
+
+    assert db.migrate(conn) == len(db.MIGRATIONS)
+    assert db.get_event_link(conn, "meeting", "google-calendar") == "event-old"
+    assert db.has_event_link(conn, "meeting", "google-calendar", "event-old")
+    old = db.add_sink_delivery(
+        conn,
+        sink="google-calendar",
+        candidate_json='{"changed":true}',
+        meeting_id="meeting",
+        role="primary",
+        instance_key="event-old",
+    )
+    later = db.add_sink_delivery(
+        conn,
+        sink="google-calendar",
+        candidate_json='{"later":true}',
+        meeting_id="meeting",
+        role="primary",
+        instance_key="event-later",
+    )
+
+    assert old == delivery_id
+    assert later != old
+    rows = db.list_sink_deliveries(conn, sink="google-calendar")
+    assert [(row["id"], row["candidate_json"]) for row in rows] == [
+        (delivery_id, '{"changed":true}'),
+        (later, '{"later":true}'),
+    ]
+
+
 def test_sink_delivery_helpers(tmp_path):
     conn = db.connect(tmp_path / "state.db")
     assert db.list_sink_deliveries(conn) == []
