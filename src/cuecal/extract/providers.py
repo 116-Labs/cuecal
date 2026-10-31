@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -64,7 +65,7 @@ def _post_json(
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         raise ProviderError(f"HTTP {exc.code} from {url}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         raise ProviderUnreachable(f"cannot reach {url}: {exc}") from exc
     try:
         body = json.loads(raw)
