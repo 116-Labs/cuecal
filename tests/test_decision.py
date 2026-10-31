@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -224,6 +225,32 @@ def test_unreachable_host_after_shutdown_raises_tier0_unavailable():
         host = server.host
     with pytest.raises(Tier0Unavailable):
         client(host, timeout=0.5, retries=1).classify("text")
+
+
+def test_non_http_status_line_raises_tier0_unavailable_after_retries():
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(5)
+    tries = 0
+
+    def answer_with_ssh_banner() -> None:
+        nonlocal tries
+        for _ in range(2):
+            conn, _addr = listener.accept()
+            with conn:
+                tries += 1
+                conn.recv(65536)
+                conn.sendall(b"SSH-2.0-OpenSSH_9.6\r\n")
+
+    serve = threading.Thread(target=answer_with_ssh_banner, daemon=True)
+    serve.start()
+    host = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    try:
+        with pytest.raises(Tier0Unavailable, match="after 2 tries"):
+            client(host, retries=1).classify("text")
+    finally:
+        serve.join(timeout=5)
+        listener.close()
+    assert tries == 2
 
 
 def test_never_invokes_the_regex_gate(monkeypatch):
