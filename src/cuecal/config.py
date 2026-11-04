@@ -6,6 +6,7 @@ The config holds only secret *references* (keyring entry names), never tokens.
 from __future__ import annotations
 
 import json
+import math
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -56,6 +57,16 @@ auto_create = 0.85
 # input_usd_per_mtok = 0.0        # prices are yours to set; there is no built-in table
 # output_usd_per_mtok = 0.0
 
+# Tier 0 decision model (#21), planned: this table is parsed but not yet used by `cuecal run`.
+# Extraction still uses the regex gate. Thresholds are provisional until the #47 eval.
+# [tier0]
+# host = "http://localhost:8080"
+# high = 0.8                      # new_invite at or above this continues to Tier 1/2
+# low = 0.3                       # any top answer below this is dropped as a near miss
+# timeout_seconds = 10
+# retries = 1                     # extra tries before Tier0Unavailable
+# serialize = true                # one request at a time per host
+
 # Mirror secondary calendars into the target calendar: add "calendar" to `sources` and pick
 # calendar IDs from `cuecal mirror calendars`.
 # [mirror]
@@ -79,6 +90,7 @@ _TOP_KEYS = {
     "conference",
     "mirror",
     "llm",
+    "tier0",
 }
 _PAID_PROVIDERS = ("anthropic", "openai")
 _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
@@ -153,6 +165,16 @@ class LLMConfig:
 
 
 @dataclass
+class Tier0Config:
+    host: str = "http://localhost:8080"
+    high: float = 0.8
+    low: float = 0.3
+    timeout_seconds: float = 10.0
+    retries: int = 1
+    serialize: bool = True
+
+
+@dataclass
 class Config:
     sources: list[str] = field(default_factory=list)
     sink: str = "google-calendar"
@@ -169,6 +191,7 @@ class Config:
     conference: ConferenceConfig = field(default_factory=ConferenceConfig)
     mirror: MirrorConfig = field(default_factory=MirrorConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    tier0: Tier0Config | None = None
 
 
 def _table(
@@ -319,6 +342,7 @@ def parse_config(data: dict[str, Any]) -> Config:
 
     cfg.mirror = _parse_mirror(data)
     cfg.llm = _parse_llm(data, cfg.secrets)
+    cfg.tier0 = _parse_tier0(data) if "tier0" in data else None
     return cfg
 
 
@@ -565,3 +589,34 @@ def write_default_config(path: Path, *, force: bool = False) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
     return True
+
+
+def _parse_tier0(data: dict[str, Any]) -> Tier0Config:
+    default = Tier0Config()
+    t0 = _table(data, "tier0", {"host", "high", "low", "timeout_seconds", "retries", "serialize"})
+    host = _string(t0, "host", "tier0", default.host)
+    if not host.startswith(("https://", "http://")) or not host.split("://", 1)[1].strip("/"):
+        raise ConfigError("tier0.host must be an http(s) URL")
+    high, low = t0.get("high", default.high), t0.get("low", default.low)
+    for key, value in (("high", high), ("low", low)):
+        if not _is_number(value) or not 0 <= value <= 1:
+            raise ConfigError(f"tier0.{key} must be a number between 0 and 1")
+    if low > high:
+        raise ConfigError("tier0.low must not exceed tier0.high")
+    timeout = _positive(t0, "timeout_seconds", "tier0", default.timeout_seconds)
+    if not math.isfinite(timeout):
+        raise ConfigError("tier0.timeout_seconds must be a finite number")
+    retries = t0.get("retries", default.retries)
+    if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 5:
+        raise ConfigError("tier0.retries must be an integer from 0 to 5")
+    serialize = t0.get("serialize", default.serialize)
+    if not isinstance(serialize, bool):
+        raise ConfigError("tier0.serialize must be true or false")
+    return Tier0Config(
+        host=host.rstrip("/"),
+        high=float(high),
+        low=float(low),
+        timeout_seconds=float(timeout),
+        retries=retries,
+        serialize=serialize,
+    )
