@@ -11,3 +11,5 @@ dist/
 .claude/skills/gaal-*/
 .agents/skills/gaal-*/
 .mcp.json
+.claude/skills/toran-*/
+.agents/skills/toran-*/
