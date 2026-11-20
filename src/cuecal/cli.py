@@ -368,7 +368,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         try:
             cfg = load_config(paths.config_path())
             _warn_unsupported_conference(cfg)
-            from cuecal.extract import extract
+            from cuecal.extract import Tier0Runner, decision, extract
 
             sink_plugin = None
             try:
@@ -387,6 +387,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             escalator = Escalator.from_config(
                 cfg, conn=conn, notifiers=notifiers, record=not args.dry_run
             )
+            tier0_runner = Tier0Runner.from_config(cfg, conn=conn)
 
             sources = []
             mirror_source = None
@@ -454,8 +455,73 @@ def cmd_run(args: argparse.Namespace) -> int:
                         if db.is_seen(conn, msg.source, msg.id):
                             continue
                         started = time.perf_counter()
-                        cand = extract(msg)
+                        t0 = tier0_runner.extract(msg) if tier0_runner is not None else None
+                        cand = extract(msg) if t0 is None else t0.candidate
                         extract_ms = (time.perf_counter() - started) * 1000
+                        if (
+                            t0 is not None
+                            and not t0.used_regex_fallback
+                            and t0.decision is not None
+                        ):
+                            route = t0.decision.route
+                            if route is decision.Route.DROP:
+                                if not args.dry_run:
+                                    db.mark_seen(conn, msg.source, msg.id)
+                                continue
+                            if route is decision.Route.NEAR_MISS:
+                                if not args.dry_run:
+                                    decision.record_near_miss(conn, msg, t0.decision)
+                                    db.mark_seen(conn, msg.source, msg.id)
+                                continue
+                            if route is decision.Route.LOG_ONLY:
+                                if not args.dry_run:
+                                    db.record_extraction(
+                                        conn,
+                                        source=getattr(msg, "source", "") or source.name,
+                                        message_id=getattr(msg, "id", "") or "",
+                                        tier="tier0",
+                                        provider=t0.provider,
+                                        model=t0.model,
+                                        input_tokens=t0.input_tokens,
+                                        output_tokens=t0.output_tokens,
+                                        latency_ms=round(extract_ms, 3),
+                                        outcome=t0.decision.label,
+                                    )
+                                    db.mark_seen(conn, msg.source, msg.id)
+                                continue
+                            if route is decision.Route.PENDING and cand is not None:
+                                if not cand.meeting_id:
+                                    cand.dedupe_key = dedupe.linkless_dedupe_key(
+                                        start=cand.start,
+                                        organizer=cand.organizer or getattr(msg, "sender", None),
+                                        title=cand.title,
+                                        source=getattr(msg, "source", ""),
+                                        message_id=getattr(msg, "id", ""),
+                                    )
+                                snippet = msg.text[:200] if getattr(msg, "text", None) else ""
+                                reason = (
+                                    f"tier 0 pending ({t0.decision.label} "
+                                    f"{t0.decision.probability:.2f})"
+                                )
+                                if args.dry_run:
+                                    logger.info(
+                                        "dry-run: would add candidate %r to pending queue (%s)",
+                                        cand.title,
+                                        reason,
+                                    )
+                                else:
+                                    _queue_pending(
+                                        conn,
+                                        notifiers,
+                                        cand,
+                                        reason=reason,
+                                        snippet=snippet,
+                                        source=getattr(msg, "source", "") or "",
+                                        message_id=getattr(msg, "id", "") or "",
+                                        dedupe_by_meeting_id=True,
+                                    )
+                                    db.mark_seen(conn, msg.source, msg.id)
+                                continue
                         if not cand:
                             # Dropped candidate: record near-miss with score based on
                             # meeting signals

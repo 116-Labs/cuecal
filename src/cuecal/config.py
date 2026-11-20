@@ -57,8 +57,9 @@ auto_create = 0.85
 # input_usd_per_mtok = 0.0        # prices are yours to set; there is no built-in table
 # output_usd_per_mtok = 0.0
 
-# Tier 0 decision model (#21), planned: this table is parsed but not yet used by `cuecal run`.
-# Extraction still uses the regex gate. Thresholds are provisional until the #47 eval.
+# Tier 0 decision model (#21), optional: off until [tier0] is set, so extraction uses the regex
+# gate by default. If the local host is unavailable, cuecal falls back to the regex gate (after
+# optional [tier0.workers_ai] below). Thresholds are provisional until the #47 eval.
 # [tier0]
 # host = "http://localhost:8080"
 # high = 0.8                      # new_invite at or above this continues to Tier 1/2
@@ -66,6 +67,17 @@ auto_create = 0.85
 # timeout_seconds = 10
 # retries = 1                     # extra tries before Tier0Unavailable
 # serialize = true                # one request at a time per host
+#
+# Optional Cloudflare Workers AI fallback (#81), off unless enabled = true; not required and
+# tested against local mock servers only. Used only after [tier0] raises Tier0Unavailable, under
+# its own daily_token_cap; any failure or cap hit falls back to the regex gate.
+# [tier0.workers_ai]
+# enabled = false
+# account_id = "<cloudflare-account-id>"
+# api_key_secret = "workers-ai"   # a key under [secrets] naming a keyring entry, never the token
+# model = "@cf/cloudflare/clef-flash"
+# timeout_seconds = 10
+# daily_token_cap = 100000
 
 # Mirror secondary calendars into the target calendar: add "calendar" to `sources` and pick
 # calendar IDs from `cuecal mirror calendars`.
@@ -95,7 +107,9 @@ _TOP_KEYS = {
 _PAID_PROVIDERS = ("anthropic", "openai")
 _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _TRANSPARENCIES = ("opaque", "transparent")
-_TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-")
+_TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-", "cfut_")
+DEFAULT_WORKERS_AI_MODEL = "@cf/cloudflare/clef-flash"
+DEFAULT_WORKERS_AI_DAILY_TOKEN_CAP = 100_000
 _TABLE_HEADER = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$")
 _TARGET_KEY = re.compile(r"^\s*target_calendar\s*=")
 
@@ -165,6 +179,16 @@ class LLMConfig:
 
 
 @dataclass
+class WorkersAIConfig:
+    enabled: bool = False
+    account_id: str = ""
+    api_key_secret: str = ""
+    model: str = DEFAULT_WORKERS_AI_MODEL
+    timeout_seconds: float = 10.0
+    daily_token_cap: int = DEFAULT_WORKERS_AI_DAILY_TOKEN_CAP
+
+
+@dataclass
 class Tier0Config:
     host: str = "http://localhost:8080"
     high: float = 0.8
@@ -172,6 +196,7 @@ class Tier0Config:
     timeout_seconds: float = 10.0
     retries: int = 1
     serialize: bool = True
+    workers_ai: WorkersAIConfig | None = None
 
 
 @dataclass
@@ -342,7 +367,7 @@ def parse_config(data: dict[str, Any]) -> Config:
 
     cfg.mirror = _parse_mirror(data)
     cfg.llm = _parse_llm(data, cfg.secrets)
-    cfg.tier0 = _parse_tier0(data) if "tier0" in data else None
+    cfg.tier0 = _parse_tier0(data, cfg.secrets) if "tier0" in data else None
     return cfg
 
 
@@ -591,9 +616,13 @@ def write_default_config(path: Path, *, force: bool = False) -> bool:
     return True
 
 
-def _parse_tier0(data: dict[str, Any]) -> Tier0Config:
+def _parse_tier0(data: dict[str, Any], secrets: dict[str, str]) -> Tier0Config:
     default = Tier0Config()
-    t0 = _table(data, "tier0", {"host", "high", "low", "timeout_seconds", "retries", "serialize"})
+    t0 = _table(
+        data,
+        "tier0",
+        {"host", "high", "low", "timeout_seconds", "retries", "serialize", "workers_ai"},
+    )
     host = _string(t0, "host", "tier0", default.host)
     if not host.startswith(("https://", "http://")) or not host.split("://", 1)[1].strip("/"):
         raise ConfigError("tier0.host must be an http(s) URL")
@@ -612,6 +641,7 @@ def _parse_tier0(data: dict[str, Any]) -> Tier0Config:
     serialize = t0.get("serialize", default.serialize)
     if not isinstance(serialize, bool):
         raise ConfigError("tier0.serialize must be true or false")
+    workers_ai = _parse_workers_ai(t0, secrets) if "workers_ai" in t0 else None
     return Tier0Config(
         host=host.rstrip("/"),
         high=float(high),
@@ -619,4 +649,62 @@ def _parse_tier0(data: dict[str, Any]) -> Tier0Config:
         timeout_seconds=float(timeout),
         retries=retries,
         serialize=serialize,
+        workers_ai=workers_ai,
+    )
+
+
+def _parse_workers_ai(t0: dict[str, Any], secrets: dict[str, str]) -> WorkersAIConfig:
+    default = WorkersAIConfig()
+    wa = _table(
+        t0,
+        "workers_ai",
+        {
+            "enabled",
+            "account_id",
+            "api_key_secret",
+            "model",
+            "timeout_seconds",
+            "daily_token_cap",
+        },
+        "tier0.workers_ai",
+    )
+    enabled = wa.get("enabled", default.enabled)
+    if not isinstance(enabled, bool):
+        raise ConfigError("tier0.workers_ai.enabled must be true or false")
+    account_id = _string(wa, "account_id", "tier0.workers_ai", default.account_id)
+    if ("account_id" in wa or enabled) and not account_id:
+        raise ConfigError("tier0.workers_ai.account_id must be a non-empty string")
+    if account_id and (any(c.isspace() for c in account_id) or any(c in account_id for c in "/?#")):
+        raise ConfigError("tier0.workers_ai.account_id must not contain spaces or URL separators")
+    key_ref = _string(wa, "api_key_secret", "tier0.workers_ai", default.api_key_secret)
+    if ("api_key_secret" in wa or enabled) and not key_ref:
+        raise ConfigError("tier0.workers_ai.api_key_secret must be a non-empty string")
+    if key_ref and key_ref.startswith(_TOKEN_PREFIXES):
+        raise ConfigError(
+            "tier0.workers_ai.api_key_secret looks like a raw token; "
+            "reference an entry under [secrets]"
+        )
+    if key_ref and key_ref not in secrets:
+        raise ConfigError("tier0.workers_ai.api_key_secret must name an entry under [secrets]")
+    model = _string(wa, "model", "tier0.workers_ai", default.model)
+    if (
+        not model
+        or any(c.isspace() for c in model)
+        or ".." in model
+        or any(c in model for c in "?#")
+    ):
+        raise ConfigError("tier0.workers_ai.model must be a non-empty model identifier")
+    timeout = _positive(wa, "timeout_seconds", "tier0.workers_ai", default.timeout_seconds)
+    if not math.isfinite(timeout):
+        raise ConfigError("tier0.workers_ai.timeout_seconds must be a finite number")
+    token_cap = wa.get("daily_token_cap", default.daily_token_cap)
+    if isinstance(token_cap, bool) or not isinstance(token_cap, int) or token_cap <= 0:
+        raise ConfigError("tier0.workers_ai.daily_token_cap must be a positive integer")
+    return WorkersAIConfig(
+        enabled=enabled,
+        account_id=account_id,
+        api_key_secret=key_ref,
+        model=model,
+        timeout_seconds=float(timeout),
+        daily_token_cap=token_cap,
     )
