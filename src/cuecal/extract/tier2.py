@@ -57,10 +57,17 @@ class LLMFields:
     confidence: float
 
 
+END_RULE = "end"
+CONFIDENCE_RULE = "confidence"
+
+
 @dataclass(frozen=True)
 class GateResult:
     fields: LLMFields | None = None
     reason: str | None = None
+    # Set only when END_RULE or CONFIDENCE_RULE failed: the start passed every check (#170).
+    draft: LLMFields | None = None
+    rule: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -166,20 +173,20 @@ def validate(
     received = _aware(received_at, zone)
     if start < received - timedelta(hours=window_hours):
         return _fail(f"start {start.isoformat()} is more than {window_hours:g}h before receipt")
-    if end <= start:
-        return _fail("end must be after start")
-    if confidence < min_confidence:
-        return _fail(f"confidence {confidence:.2f} below {min_confidence:.2f}")
-    return GateResult(
-        LLMFields(
-            title=title.strip(),
-            start=start,
-            end=end,
-            tz=tz,
-            attendees=[a.strip() for a in attendees if a.strip()],
-            confidence=float(confidence),
-        )
+    fields = LLMFields(
+        title=title.strip(),
+        start=start,
+        end=end,
+        tz=tz,
+        attendees=[a.strip() for a in attendees if a.strip()],
+        confidence=float(confidence),
     )
+    if end <= start:
+        return GateResult(reason="end must be after start", draft=fields, rule=END_RULE)
+    if confidence < min_confidence:
+        reason = f"confidence {confidence:.2f} below {min_confidence:.2f}"
+        return GateResult(reason=reason, draft=fields, rule=CONFIDENCE_RULE)
+    return GateResult(fields)
 
 
 def merge(partial: MeetingCandidate, fields: LLMFields, tier: str) -> MeetingCandidate:
