@@ -2736,6 +2736,63 @@ def test_cli_run_tier0_local_routes_every_decision_without_calling_fallbacks(
     assert "dummy:m6" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("label", ["not_invite", "mentions_meeting"])
+def test_cli_run_tier0_negative_decision_keeps_parsed_ics_invitation(
+    tmp_path, monkeypatch, label
+):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    ics = (
+        "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:ics-1\r\n"
+        "DTSTART:20301003T210000Z\r\nDTEND:20301003T220000Z\r\nSUMMARY:Planning\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [
+        Message("m1", "dummy", "a", now, "see attached", None, (ics,)),
+        Message("m2", "dummy", "a", now, "no attachment here"),
+    ]
+    with _tier0_server(lambda _body: (200, _tier0_answer(**{label: 0.95}))) as local_srv:
+        toml = f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n'
+        sink = _setup_tier0_run(tmp_path, monkeypatch, messages, toml)
+        assert cli.main(["run", "--once"]) == 0
+
+    assert sink.created == []
+    conn = db.connect(tmp_path / "state.db")
+    assert [p["message_id"] for p in db.list_pending(conn)] == ["m1"]
+    assert db.is_seen(conn, "dummy", "m1") and db.is_seen(conn, "dummy", "m2")
+
+
+def test_cli_run_dry_run_never_calls_workers_ai_or_records_usage(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [Message("m1", "dummy", "a", now, TEMPLATE_INVITE)]
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "cf-key")
+    with (
+        _tier0_server(lambda _body: (503, {})) as local_srv,
+        _tier0_server(lambda _body: (200, {})) as cloud_srv,
+    ):
+        monkeypatch.setattr("cuecal.extract.decision.WORKERS_AI_BASE_URL", cloud_srv.host)
+        toml = (
+            f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n\n'
+            '[tier0.workers_ai]\nenabled = true\naccount_id = "acct"\napi_key_secret = "cf"\n'
+        )
+        sink = _setup_tier0_run(
+            tmp_path, monkeypatch, messages, toml, secret_ref=("cf", "cuecal-cf")
+        )
+        assert cli.main(["run", "--once", "--dry-run"]) == 0
+        assert cloud_srv.requests == []
+
+    assert sink.created == []
+    conn = db.connect(tmp_path / "state.db")
+    assert conn.execute("SELECT COUNT(*) FROM tier0_usage").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     "workers_ai_toml",
     [

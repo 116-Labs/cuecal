@@ -387,7 +387,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             escalator = Escalator.from_config(
                 cfg, conn=conn, notifiers=notifiers, record=not args.dry_run
             )
-            tier0_runner = Tier0Runner.from_config(cfg, conn=conn)
+            tier0_runner = Tier0Runner.from_config(cfg, conn=conn, dry_run=args.dry_run)
 
             sources = []
             mirror_source = None
@@ -464,11 +464,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                             and t0.decision is not None
                         ):
                             route = t0.decision.route
-                            if route is decision.Route.DROP:
+                            if route is decision.Route.DROP and cand is None:
                                 if not args.dry_run:
                                     db.mark_seen(conn, msg.source, msg.id)
                                 continue
-                            if route is decision.Route.NEAR_MISS:
+                            if route is decision.Route.NEAR_MISS and cand is None:
                                 if not args.dry_run:
                                     decision.record_near_miss(conn, msg, t0.decision)
                                     db.mark_seen(conn, msg.source, msg.id)

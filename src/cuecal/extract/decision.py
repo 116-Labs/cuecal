@@ -239,7 +239,9 @@ def _workers_ai_usage(body: dict[str, Any]) -> ProviderResult:
 
 
 def workers_ai_cap_reason(conn: sqlite3.Connection, daily_token_cap: int, day: str) -> str | None:
-    """Why Workers AI must be skipped today, or None. Unknown or unreadable usage is capped."""
+    """Why Workers AI must be skipped today, or None. Unknown or unreadable usage is capped.
+
+    The cap is soft: it is checked before a request, so the last request may overshoot it."""
     try:
         tokens = db.get_tier0_usage(conn, day)
         unknown = db.tier0_usage_unknown(conn, day)
@@ -308,12 +310,16 @@ class WorkersAIClient:
         if not key:
             raise ProviderError("Workers AI API key missing from the keyring")
         url = f"{self.base_url}/accounts/{self.account_id}/ai/run/{self.model.lstrip('/')}"
-        body = _post_json(
-            url,
-            build_request(text),
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=self.timeout,
-        )
+        try:
+            body = _post_json(
+                url,
+                {**build_request(text), "model": self.model},
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=self.timeout,
+            )
+        except ProviderError as exc:
+            # A request that may have been billed before it failed is unknown usage, never zero.
+            raise UnusableAnswer(str(exc), ProviderResult("", usage_known=False)) from exc
         usage = _workers_ai_usage(body)
         if body.get("success") is False:
             raise UnusableAnswer("Workers AI response reported success = false", usage)

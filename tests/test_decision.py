@@ -369,7 +369,10 @@ def test_workers_ai_sends_five_class_request_and_parses_cloudflare_envelope():
     [req] = server.requests
     assert req["path"] == "/accounts/acct-42/ai/run/@cf/cloudflare/clef-flash"
     assert req["headers"]["authorization"] == "Bearer cf-secret-token"
-    assert req["body"] == build_request("lunch sync tomorrow at noon?")
+    assert req["body"] == {
+        **build_request("lunch sync tomorrow at noon?"),
+        "model": "@cf/cloudflare/clef-flash",
+    }
     assert res.decision.route is Route.TIER1_2
     assert (res.input_tokens, res.output_tokens, res.usage_known) == (60, 12, True)
 
@@ -405,6 +408,17 @@ def test_workers_ai_unusable_answer_preserves_billed_usage():
             cloud.classify("text")
     assert (info.value.usage.input_tokens, info.value.usage.output_tokens) == (50, 10)
     assert info.value.usage.usage_known is True
+
+
+@pytest.mark.parametrize("status", [500, 429])
+def test_workers_ai_http_error_after_send_reports_unknown_usage(status):
+    with serving((status, {}, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct", api_key=lambda: "k", high=0.8, low=0.3, base_url=server.host
+        )
+        with pytest.raises(UnusableAnswer) as info:
+            cloud.classify("text")
+    assert info.value.usage.usage_known is False
 
 
 @pytest.mark.parametrize(

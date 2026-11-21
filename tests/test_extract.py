@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import pytest
+
 from cuecal import db, extract
 from cuecal.config import parse_config
 from cuecal.extract import decision, tier0, tier1
@@ -222,3 +224,81 @@ def test_tier0_runner_workers_ai_cap_is_independent_of_tier3_llm_usage(
     assert len(cloud_srv.requests) == 1
     assert len(caplog.records) == 1
     assert "degraded" in caplog.records[0].getMessage()
+
+
+_ICS = (
+    "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:1\r\n"
+    "DTSTART:20261003T210000Z\r\nSUMMARY:X\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+
+@pytest.mark.parametrize("label", ["not_invite", "mentions_meeting"])
+def test_tier0_runner_negative_decision_keeps_parsed_ics_invitation(tmp_path, label):
+    conn = db.connect(tmp_path / "state.db")
+    with _serving(200, _answer(**{label: 0.95})) as local_srv:
+        cfg = parse_config({"tier0": {"host": local_srv.host, "retries": 0}})
+        runner = extract.Tier0Runner.from_config(cfg, conn=conn)
+        assert runner is not None
+        with_ics = runner.extract(msg("see attached", (_ICS,)))
+        without = runner.extract(msg("see attached"))
+    assert with_ics.decision is not None and with_ics.decision.route in (
+        Route.DROP,
+        Route.NEAR_MISS,
+    )
+    assert with_ics.candidate is not None and with_ics.candidate.tier == "ics"
+    assert without.candidate is None
+
+
+def test_tier0_runner_dry_run_never_calls_workers_ai_or_records_usage(
+    tmp_path, monkeypatch, caplog
+):
+    conn = db.connect(tmp_path / "state.db")
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "cf-token")
+    with (
+        _serving(503, {}) as local_srv,
+        _serving(200, _cloud_reply(new_invite=0.9)) as cloud_srv,
+    ):
+        monkeypatch.setattr(decision, "WORKERS_AI_BASE_URL", cloud_srv.host)
+        cfg = parse_config(
+            {
+                "secrets": {"cf": "cuecal-cf"},
+                "tier0": {
+                    "host": local_srv.host,
+                    "retries": 0,
+                    "workers_ai": {"enabled": True, "account_id": "acct", "api_key_secret": "cf"},
+                },
+            }
+        )
+        runner = extract.Tier0Runner.from_config(cfg, conn=conn, dry_run=True)
+        assert runner is not None
+        out = runner.extract(msg("call: https://meet.google.com/abc-defg-hij"))
+    assert out.used_regex_fallback
+    assert cloud_srv.requests == []
+    assert db.get_tier0_usage(conn, "2026-10-18") == 0
+
+
+def test_tier0_runner_workers_ai_transport_failure_caps_the_day(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "state.db")
+    now = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "cf-token")
+    with _serving(500, {}) as local_srv, _serving(500, {}) as cloud_srv:
+        monkeypatch.setattr(decision, "WORKERS_AI_BASE_URL", cloud_srv.host)
+        cfg = parse_config(
+            {
+                "secrets": {"cf": "cuecal-cf"},
+                "llm": {"timezone": "UTC"},
+                "tier0": {
+                    "host": local_srv.host,
+                    "retries": 0,
+                    "workers_ai": {"enabled": True, "account_id": "acct", "api_key_secret": "cf"},
+                },
+            }
+        )
+        runner = extract.Tier0Runner.from_config(cfg, conn=conn)
+        assert runner is not None
+        runner.now = lambda: now
+        first = runner.extract(msg("room sync", mid="m1"))
+        second = runner.extract(msg("room sync", mid="m2"))
+    assert first.used_regex_fallback and second.used_regex_fallback
+    assert len(cloud_srv.requests) == 1
+    assert db.tier0_usage_unknown(conn, "2026-10-18")

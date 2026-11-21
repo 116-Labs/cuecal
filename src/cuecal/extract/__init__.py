@@ -55,6 +55,16 @@ def extract(message: Message) -> MeetingCandidate | None:
     return None if links is None else _candidate_from_message(message, links)
 
 
+def _ics_candidate(message: Message) -> MeetingCandidate | None:
+    """A parsed calendar invitation outranks a negative text-only Tier 0 decision."""
+    for attachment in message.attachments:
+        if "BEGIN:VCALENDAR" in attachment:
+            cand = tier1.parse_ics(attachment, message.permalink or message.id)
+            if cand:
+                return cand
+    return None
+
+
 @dataclass(frozen=True)
 class Tier0Outcome:
     candidate: MeetingCandidate | None = None
@@ -78,8 +88,10 @@ class Tier0Runner:
         workers_ai: WorkersAIClient | None = None,
         timezone: str = "",
         now: Callable[[], datetime] | None = None,
+        dry_run: bool = False,
     ) -> None:
         self.cfg = cfg
+        self.dry_run = dry_run
         self.conn = conn
         self.local = local or Tier0Client.from_config(cfg)
         self.workers_ai = workers_ai
@@ -89,15 +101,19 @@ class Tier0Runner:
         self._usage_write_failed = False
 
     @classmethod
-    def from_config(cls, cfg: Config, *, conn: sqlite3.Connection) -> Tier0Runner | None:
+    def from_config(
+        cls, cfg: Config, *, conn: sqlite3.Connection, dry_run: bool = False
+    ) -> Tier0Runner | None:
         if cfg.tier0 is None:
             return None
         wa = cfg.tier0.workers_ai
         cloud = None
-        if wa is not None and wa.enabled:
+        if wa is not None and wa.enabled and not dry_run:
             entry = cfg.secrets[wa.api_key_secret]
             cloud = WorkersAIClient.from_config(cfg.tier0, wa, lambda: secrets.get_secret(entry))
-        return cls(cfg.tier0, conn=conn, workers_ai=cloud, timezone=cfg.llm.timezone)
+        return cls(
+            cfg.tier0, conn=conn, workers_ai=cloud, timezone=cfg.llm.timezone, dry_run=dry_run
+        )
 
     def extract(self, message: Message) -> Tier0Outcome:
         try:
@@ -119,7 +135,7 @@ class Tier0Runner:
 
     def _try_workers_ai(self, message: Message) -> Tier0Outcome | None:
         wa_cfg = self.cfg.workers_ai
-        if self.workers_ai is None or wa_cfg is None or not wa_cfg.enabled:
+        if self.dry_run or self.workers_ai is None or wa_cfg is None or not wa_cfg.enabled:
             return None
         zone = ZoneInfo(tier2.recipient_timezone(self.timezone) or "UTC")
         day = self.now().astimezone(zone).date().isoformat()
@@ -169,6 +185,10 @@ class Tier0Runner:
             if dec.route is Route.PENDING:
                 cand = dataclasses.replace(cand, confidence=dec.probability)
             return dataclasses.replace(base, candidate=cand)
+        if dec.route in (Route.DROP, Route.NEAR_MISS):
+            ics = _ics_candidate(message)
+            if ics is not None:
+                return dataclasses.replace(base, candidate=ics)
         logger.info(
             "tier 0 %s %s:%s (%s %.2f)",
             dec.route.value,
