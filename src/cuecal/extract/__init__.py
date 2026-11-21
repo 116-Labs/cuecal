@@ -122,15 +122,15 @@ class Tier0Runner:
                 message, Tier0Outcome(decision=dec, provider="llama-server")
             )
         except Tier0Unavailable:
-            cloud = self._try_workers_ai(message)
-            if cloud is not None:
-                return cloud
             if not self._degraded_warned:
                 self._degraded_warned = True
                 logger.warning(
-                    "tier 0 host %s unavailable; running degraded on the regex gate",
+                    "tier 0 host %s unavailable; running degraded (Workers AI or regex gate)",
                     self.local.host,
                 )
+            cloud = self._try_workers_ai(message)
+            if cloud is not None:
+                return cloud
             return Tier0Outcome(candidate=extract(message), used_regex_fallback=True)
 
     def _try_workers_ai(self, message: Message) -> Tier0Outcome | None:

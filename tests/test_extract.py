@@ -216,7 +216,7 @@ def test_tier0_runner_workers_ai_cap_is_independent_of_tier3_llm_usage(
         runner.now = lambda: now
         with caplog.at_level("WARNING", logger="cuecal.extract"):
             first = runner.extract(msg("room sync tomorrow at 2", mid="m1"))
-            assert caplog.records == []
+            assert len(caplog.records) == 1
             second = runner.extract(msg("room sync tomorrow at 3", mid="m2"))
     assert not first.used_regex_fallback and first.decision is not None
     assert first.decision.route is Route.TIER1_2

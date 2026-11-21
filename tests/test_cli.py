@@ -2887,7 +2887,11 @@ def test_cli_run_tier0_local_unavailable_routes_via_workers_ai_when_enabled(
         assert cloud_srv.requests[0]["headers"]["authorization"] == "Bearer cf-key"
         assert cloud_srv.requests[0]["path"] == "/accounts/acct-9/ai/run/@cf/cloudflare/clef-flash"
 
-    assert [r for r in caplog.records if r.name == "cuecal.extract"] == []
+    warnings = [
+        r for r in caplog.records if r.name == "cuecal.extract" and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1
+    assert "degraded" in warnings[0].getMessage()
     assert [c.meeting_id for c in sink.created] == ["81234567890"]
     conn = db.connect(tmp_path / "state.db")
     assert [m["message_id"] for m in db.list_near_misses(conn)] == ["m3"]
