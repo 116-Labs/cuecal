@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from cuecal import db, notify, secrets
 from cuecal.config import Config, LLMConfig, LocalLLMConfig, PaidLLMConfig
 from cuecal.extract import decision, tier1, tier2, tier3
-from cuecal.extract.decision import Tier0Client, Tier0Unavailable
+from cuecal.extract.decision import Tier0Busy, Tier0Client, Tier0Unavailable
 from cuecal.extract.providers import AnthropicProvider, OllamaProvider, OpenAIProvider, Provider
 from cuecal.models import MeetingCandidate, Message
 
@@ -26,6 +26,7 @@ LOCAL_TIER = "local"
 PAID_TIER = "paid"
 UNKNOWN_TIMEZONE = "recipient timezone unknown; set [llm].timezone"
 LOCAL_UNREACHABLE = "tier 2 skipped: local model unreachable earlier this run"
+CHECK_UNAVAILABLE_EARLIER = "tier 2.5 unavailable: decision model failed earlier this run"
 NEAR_MISS_LABELS = ("not_invite", "mentions_meeting")
 LOG_ONLY_LABELS = ("reschedule", "cancel")
 
@@ -106,6 +107,7 @@ class Escalator:
         self._usage_write_failed = False
         self._timezone_warned = False
         self._local_unreachable = False
+        self._check_unavailable = False
 
     @classmethod
     def from_config(
@@ -184,7 +186,7 @@ class Escalator:
                 self._local_unreachable = True
                 logger.warning("tier 2 unreachable; skipped for the rest of this run")
         if self.local is not None and self.check is not None:
-            outcome.drop_reason = self._invite_check(self.check, message, cand)
+            outcome.drop_reason = self._invite_check(self.check, message, cand, notes)
             if outcome.drop_reason is not None:
                 return outcome
         if self.llm.paid is not None:
@@ -201,13 +203,22 @@ class Escalator:
         return outcome
 
     def _invite_check(
-        self, check: Tier0Client, message: Message, cand: MeetingCandidate
+        self, check: Tier0Client, message: Message, cand: MeetingCandidate, notes: list[str]
     ) -> str | None:
         """Tier 2.5 (#82): the drop reason when Clef-flash decisively says "no new invite"."""
+        if self._check_unavailable:
+            notes.append(CHECK_UNAVAILABLE_EARLIER)
+            return None
         try:
-            answer = check.classify(message.text)
+            answer = check.classify(message.text, lock_timeout=check.timeout)
+        except Tier0Busy as exc:
+            notes.append(f"tier 2.5 busy: {exc}")
+            logger.info("tier 2.5 busy for %r: %s", cand.title, exc)
+            return None
         except Tier0Unavailable as exc:
-            logger.warning("tier 2.5 skipped for %r: %s", cand.title, exc)
+            self._check_unavailable = True
+            notes.append(f"tier 2.5 unavailable: {exc}")
+            logger.warning("tier 2.5 unavailable; skipped for the rest of this run: %s", exc)
             return None
         verdict = f"tier 2.5: {answer.label} at {answer.probability:.2f}"
         decisive = answer.probability >= self.llm.check.invite_threshold

@@ -55,6 +55,10 @@ class Tier0Unavailable(RuntimeError):
     """Raised when the decision-model host cannot answer after the bounded retries."""
 
 
+class Tier0Busy(RuntimeError):
+    """Raised when another request held the host lock for the whole bounded wait."""
+
+
 class Route(StrEnum):
     TIER1_2 = "tier1_2"  # continue to Tier 1 / Tier 2
     PENDING = "pending"  # low-to-mid confidence invite: approval queue (ADR 0009)
@@ -159,20 +163,27 @@ class Tier0Client:
             serialize=cfg.serialize,
         )
 
-    def _ask(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _ask(self, payload: dict[str, Any], lock_timeout: float | None) -> dict[str, Any]:
         url = f"{self.host}{ENDPOINT}"
         if not self.serialize:
             return _post_json(url, payload, headers={}, timeout=self.timeout)
-        with _host_lock(self.host):
+        lock = _host_lock(self.host)
+        if not lock.acquire(timeout=-1 if lock_timeout is None else lock_timeout):
+            raise Tier0Busy(f"tier 0 host {self.host} was busy for {lock_timeout:g}s")
+        try:
             return _post_json(url, payload, headers={}, timeout=self.timeout)
+        finally:
+            lock.release()
 
-    def classify(self, text: str) -> Tier0Decision:
-        """Ask the five-class question; raise Tier0Unavailable once ``retries`` extra tries fail."""
+    def classify(self, text: str, *, lock_timeout: float | None = None) -> Tier0Decision:
+        """Ask the five-class question; raise Tier0Unavailable once ``retries`` extra tries fail.
+
+        With ``lock_timeout`` set, a host lock held that long raises Tier0Busy, never retried."""
         payload = build_request(text)
         last: Exception | None = None
         for attempt in range(1 + self.retries):
             try:
-                probs, confidence = parse_answer(self._ask(payload))
+                probs, confidence = parse_answer(self._ask(payload, lock_timeout))
             except ProviderError as exc:
                 last = exc
                 logger.info("tier 0 attempt %d failed: %s", attempt + 1, exc)
