@@ -532,6 +532,47 @@ def test_cli_run_does_not_reprocess_a_created_message(tmp_path, monkeypatch):
     assert len(created) == 1
     conn = db.connect(tmp_path / "state.db")
     assert db.is_seen(conn, "dummy", "msg1")
+
+
+def test_cli_run_creates_no_event_or_pending_item_for_a_tier_2_5_drop(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from cuecal.extract.escalate import Outcome
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    created = []
+
+    class Sink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            created.append(candidate.meeting_id)
+            return "evt"
+
+    msg = Message(id="msg1", source="dummy", sender="a", ts=datetime.now(), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else Sink(),
+    )
+    calls = []
+    _counting_extract(
+        monkeypatch, calls, MeetingCandidate(confidence=0.9, title="T", meeting_id="m1")
+    )
+    monkeypatch.setattr(
+        "cuecal.extract.escalate.Escalator.process",
+        lambda self, message, cand, **kw: Outcome(cand, drop_reason="tier 2.5: cancel at 0.95"),
+    )
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 0
+    assert cli.main(["run", "--once"]) == 0
+
+    assert calls == ["msg1"]
+    assert created == []
+    conn = db.connect(tmp_path / "state.db")
+    assert db.list_pending(conn, status=None) == []
+    assert db.is_seen(conn, "dummy", "msg1")
     assert db.get_counts_by_source(conn) == {"dummy": 1}
 
 

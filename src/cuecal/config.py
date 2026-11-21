@@ -56,6 +56,11 @@ auto_create = 0.85
 # daily_usd_cap = 1.0
 # input_usd_per_mtok = 0.0        # prices are yours to set; there is no built-in table
 # output_usd_per_mtok = 0.0
+#
+# [llm.check]                     # Tier 2.5 (#82): asks the [tier0] host before Tier 3
+# enabled = false                 # true needs [tier0]; a decisive non-invite skips Tier 3
+# invite_threshold = 0.9          # thresholds are provisional until the Tier 2.5 eval
+# start_threshold = 0.9
 
 # Tier 0 decision model (#21), optional: off until [tier0] is set, so extraction uses the regex
 # gate by default. If the local host is unavailable, cuecal falls back to the regex gate (after
@@ -174,6 +179,13 @@ class PaidLLMConfig:
 
 
 @dataclass
+class CheckConfig:
+    enabled: bool = False
+    invite_threshold: float = 0.9
+    start_threshold: float = 0.9
+
+
+@dataclass
 class LLMConfig:
     min_confidence: float = 0.7
     start_past_window_hours: float = 24.0
@@ -181,6 +193,7 @@ class LLMConfig:
     timezone: str = ""
     local: LocalLLMConfig | None = None
     paid: PaidLLMConfig | None = None
+    check: CheckConfig = field(default_factory=CheckConfig)
 
 
 @dataclass
@@ -373,6 +386,11 @@ def parse_config(data: dict[str, Any]) -> Config:
     cfg.mirror = _parse_mirror(data)
     cfg.llm = _parse_llm(data, cfg.secrets)
     cfg.tier0 = _parse_tier0(data, cfg.secrets) if "tier0" in data else None
+    if cfg.llm.check.enabled and cfg.tier0 is None:
+        raise ConfigError(
+            "llm.check.enabled = true needs a [tier0] table: Tier 2.5 asks the decision model "
+            "at [tier0].host"
+        )
     return cfg
 
 
@@ -412,7 +430,9 @@ def _valid_zone(name: str) -> bool:
 def _parse_llm(data: dict[str, Any], secrets: dict[str, str]) -> LLMConfig:
     default = LLMConfig()
     llm = _table(
-        data, "llm", {"min_confidence", "start_past_window_hours", "timezone", "local", "paid"}
+        data,
+        "llm",
+        {"min_confidence", "start_past_window_hours", "timezone", "local", "paid", "check"},
     )
     min_conf = llm.get("min_confidence", default.min_confidence)
     if not _is_number(min_conf) or not 0 <= min_conf <= 1:
@@ -427,7 +447,25 @@ def _parse_llm(data: dict[str, Any], secrets: dict[str, str]) -> LLMConfig:
         timezone=timezone,
         local=_parse_llm_local(llm) if "local" in llm else None,
         paid=_parse_llm_paid(llm, secrets) if "paid" in llm else None,
+        check=_parse_llm_check(llm),
     )
+
+
+def _parse_llm_check(llm: dict[str, Any]) -> CheckConfig:
+    default = CheckConfig()
+    check = _table(
+        llm, "check", {"enabled", "invite_threshold", "start_threshold"}, "llm.check"
+    )
+    enabled = check.get("enabled", default.enabled)
+    if not isinstance(enabled, bool):
+        raise ConfigError("llm.check.enabled must be true or false")
+    thresholds = {}
+    for key in ("invite_threshold", "start_threshold"):
+        value = check.get(key, getattr(default, key))
+        if not _is_number(value) or not 0 <= value <= 1:
+            raise ConfigError(f"llm.check.{key} must be a number between 0 and 1")
+        thresholds[key] = float(value)
+    return CheckConfig(enabled=enabled, **thresholds)
 
 
 def _parse_llm_local(llm: dict[str, Any]) -> LocalLLMConfig:
