@@ -62,8 +62,8 @@ auto_create = 0.85
 # invite_threshold = 0.9          # thresholds are provisional until the Tier 2.5 eval
 # start_threshold = 0.9
 
-# Tier 0 decision model (#21), planned: this table is parsed but not yet used by `cuecal run`.
-# Extraction still uses the regex gate. Thresholds are provisional until the #47 eval.
+# Tier 0 decision model host (#21). `cuecal run` uses it only for [llm.check]; Tier 0 gating
+# (high/low) is planned, so extraction still uses the regex gate. Provisional until the #47 eval.
 # [tier0]
 # host = "http://localhost:8080"
 # high = 0.8                      # new_invite at or above this continues to Tier 1/2
