@@ -426,3 +426,99 @@ def test_mirror_target_defaults_to_primary_when_unset():
 def test_validation_errors(data, message):
     with pytest.raises(ConfigError, match=message):
         parse_config(data)
+
+
+def test_default_config_and_readme_document_opt_in_workers_ai_fallback():
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    for text in (DEFAULT_CONFIG_TOML, readme):
+        assert "[tier0.workers_ai]" in text
+        assert "enabled = false" in text
+        assert "api_key_secret" in text
+        assert "[secrets]" in text
+        assert "daily_token_cap" in text
+        assert "not required" in text or "neither required" in text
+
+
+def test_tier0_workers_ai_defaults_and_full_parse():
+    disabled = parse_config({"tier0": {"workers_ai": {}}}).tier0.workers_ai
+    assert disabled.enabled is False
+    assert disabled.model == "@cf/cloudflare/clef-flash"
+    assert disabled.timeout_seconds == 10.0
+    assert disabled.daily_token_cap == 100_000
+
+    cfg = parse_config(
+        {
+            "secrets": {"cf": "cuecal-workers-ai"},
+            "tier0": {
+                "host": "http://gpu-box:8080/",
+                "workers_ai": {
+                    "enabled": True,
+                    "account_id": " acct-123 ",
+                    "api_key_secret": "cf",
+                    "model": "@cf/cloudflare/clef-flash",
+                    "timeout_seconds": 6.5,
+                    "daily_token_cap": 25_000,
+                },
+            },
+        }
+    )
+    wa = cfg.tier0.workers_ai
+    assert (wa.enabled, wa.account_id, wa.api_key_secret) == (True, "acct-123", "cf")
+    assert (wa.model, wa.timeout_seconds, wa.daily_token_cap) == (
+        "@cf/cloudflare/clef-flash",
+        6.5,
+        25_000,
+    )
+
+
+def test_tier0_workers_ai_accepts_the_non_flash_clef_model():
+    cfg = parse_config({"tier0": {"workers_ai": {"model": "@cf/cloudflare/clef"}}})
+    assert cfg.tier0.workers_ai.model == "@cf/cloudflare/clef"
+
+
+@pytest.mark.parametrize(
+    ("workers_ai", "message"),
+    [
+        ("yes", r"\[tier0\.workers_ai\] must be a table"),
+        ({"enabled": "true"}, "tier0.workers_ai.enabled must be true or false"),
+        ({"enabled": True}, "tier0.workers_ai.account_id"),
+        ({"account_id": ""}, "tier0.workers_ai.account_id"),
+        ({"account_id": 42}, "tier0.workers_ai.account_id"),
+        ({"account_id": "bad/path"}, "tier0.workers_ai.account_id"),
+        ({"enabled": True, "account_id": "acct"}, "tier0.workers_ai.api_key_secret"),
+        ({"api_key_secret": ""}, "tier0.workers_ai.api_key_secret"),
+        ({"api_key_secret": "missing"}, r"entry under \[secrets\]"),
+        ({"model": ""}, "tier0.workers_ai.model"),
+        ({"model": "../bad"}, "tier0.workers_ai.model"),
+        ({"model": "@cf/meta/llama-3-8b-instruct"}, "tier0.workers_ai.model"),
+        ({"timeout_seconds": 0}, "tier0.workers_ai.timeout_seconds"),
+        ({"timeout_seconds": float("inf")}, "tier0.workers_ai.timeout_seconds"),
+        ({"daily_token_cap": 0}, "tier0.workers_ai.daily_token_cap"),
+        ({"daily_token_cap": -10}, "tier0.workers_ai.daily_token_cap"),
+        ({"daily_token_cap": 1.5}, "tier0.workers_ai.daily_token_cap"),
+        ({"daily_token_cap": True}, "tier0.workers_ai.daily_token_cap"),
+        ({"extra": 1}, r"unknown keys in \[tier0\.workers_ai\]"),
+    ],
+)
+def test_tier0_workers_ai_validation_errors(workers_ai, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"secrets": {"cf": "cuecal-cf"}, "tier0": {"workers_ai": workers_ai}})
+
+
+def test_tier0_workers_ai_rejects_secret_value_without_echoing_it():
+    pasted = "cfut_super_secret_cloudflare_token_value"
+    with pytest.raises(ConfigError) as info:
+        parse_config(
+            {
+                "tier0": {
+                    "workers_ai": {
+                        "enabled": True,
+                        "account_id": "acct-1",
+                        "api_key_secret": pasted,
+                    }
+                }
+            }
+        )
+    assert pasted not in str(info.value)

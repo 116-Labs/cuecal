@@ -23,8 +23,29 @@ def test_migrate_from_empty(tmp_path):
         "near_miss",
         "sink_delivery",
         "llm_usage",
+        "tier0_usage",
         "extraction_telemetry",
     } <= _tables(conn)
+
+
+def test_tier0_usage_accumulates_independently_of_llm_usage(tmp_path):
+    conn = db.connect(tmp_path / "state.db")
+    db.add_llm_usage(conn, "2026-10-18", input_tokens=500, output_tokens=100, usd=0.05)
+    assert db.get_tier0_usage(conn, "2026-10-18") == 0
+    assert not db.tier0_usage_unknown(conn, "2026-10-18")
+    db.add_tier0_usage(conn, "2026-10-18", input_tokens=40, output_tokens=15)
+    db.add_tier0_usage(conn, "2026-10-18", input_tokens=20, output_tokens=5)
+    conn.close()
+
+    reopened = db.connect(tmp_path / "state.db")
+    assert db.get_tier0_usage(reopened, "2026-10-18") == 80
+    assert db.get_tier0_usage(reopened, "2026-10-19") == 0
+    assert db.get_llm_usage(reopened, "2026-10-18")[0] == 600
+    assert not db.llm_usage_unknown(reopened, "2026-10-18")
+
+    db.mark_tier0_usage_unknown(reopened, "2026-10-18")
+    assert db.tier0_usage_unknown(reopened, "2026-10-18")
+    assert not db.llm_usage_unknown(reopened, "2026-10-18")
 
 
 def test_llm_usage_accumulates_per_day_and_survives_a_new_connection(tmp_path):

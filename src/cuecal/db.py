@@ -166,6 +166,14 @@ MIGRATIONS: list[str] = [
         FROM sink_delivery_v8;
     DROP TABLE sink_delivery_v8;
     """,
+    """
+    CREATE TABLE tier0_usage (
+        day TEXT PRIMARY KEY,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        usage_unknown INTEGER NOT NULL DEFAULT 0
+    );
+    """,
 ]
 
 SINK_DELIVERY_STATUSES = ("pending", "synced", "failed")
@@ -342,6 +350,40 @@ def mark_llm_usage_unknown(conn: sqlite3.Connection, day: str) -> None:
 
 def llm_usage_unknown(conn: sqlite3.Connection, day: str) -> bool:
     row = conn.execute("SELECT usage_unknown FROM llm_usage WHERE day = ?", (day,)).fetchone()
+    return bool(row and row[0])
+
+
+def get_tier0_usage(conn: sqlite3.Connection, day: str) -> int:
+    """Return total tokens spent on Tier 0 Workers AI calls on this local date."""
+    row = conn.execute(
+        "SELECT input_tokens + output_tokens FROM tier0_usage WHERE day = ?", (day,)
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def add_tier0_usage(
+    conn: sqlite3.Connection, day: str, *, input_tokens: int, output_tokens: int
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO tier0_usage (day, input_tokens, output_tokens) VALUES (?, ?, ?)
+        ON CONFLICT(day) DO UPDATE SET
+            input_tokens = input_tokens + excluded.input_tokens,
+            output_tokens = output_tokens + excluded.output_tokens
+        """,
+        (day, input_tokens, output_tokens),
+    )
+    conn.commit()
+
+
+def mark_tier0_usage_unknown(conn: sqlite3.Connection, day: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO tier0_usage (day) VALUES (?)", (day,))
+    conn.execute("UPDATE tier0_usage SET usage_unknown = 1 WHERE day = ?", (day,))
+    conn.commit()
+
+
+def tier0_usage_unknown(conn: sqlite3.Connection, day: str) -> bool:
+    row = conn.execute("SELECT usage_unknown FROM tier0_usage WHERE day = ?", (day,)).fetchone()
     return bool(row and row[0])
 
 
