@@ -371,10 +371,31 @@ def test_workers_ai_sends_five_class_request_and_parses_cloudflare_envelope():
     assert req["headers"]["authorization"] == "Bearer cf-secret-token"
     assert req["body"] == {
         **build_request("lunch sync tomorrow at noon?"),
-        "model": "@cf/cloudflare/clef-flash",
+        "model": "clef-flash",
     }
     assert res.decision.route is Route.TIER1_2
     assert (res.input_tokens, res.output_tokens, res.usage_known) == (60, 12, True)
+
+
+@pytest.mark.parametrize(
+    ("model", "selector"),
+    [("@cf/cloudflare/clef-flash", "clef-flash"), ("@cf/cloudflare/clef", "clef")],
+)
+def test_workers_ai_keeps_full_model_id_in_url_and_short_selector_in_body(model, selector):
+    envelope = {"success": True, "result": {"answers": answer(new_invite=0.9)}}
+    with serving((200, envelope, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct-42",
+            api_key=lambda: "cf-secret-token",
+            high=0.8,
+            low=0.3,
+            model=model,
+            base_url=server.host,
+        )
+        cloud.classify("lunch sync tomorrow at noon?")
+    [req] = server.requests
+    assert req["path"] == f"/accounts/acct-42/ai/run/{model}"
+    assert req["body"]["model"] == selector
 
 
 @pytest.mark.parametrize(

@@ -473,6 +473,11 @@ def test_tier0_workers_ai_defaults_and_full_parse():
     )
 
 
+def test_tier0_workers_ai_accepts_the_non_flash_clef_model():
+    cfg = parse_config({"tier0": {"workers_ai": {"model": "@cf/cloudflare/clef"}}})
+    assert cfg.tier0.workers_ai.model == "@cf/cloudflare/clef"
+
+
 @pytest.mark.parametrize(
     ("workers_ai", "message"),
     [
@@ -487,6 +492,7 @@ def test_tier0_workers_ai_defaults_and_full_parse():
         ({"api_key_secret": "missing"}, r"entry under \[secrets\]"),
         ({"model": ""}, "tier0.workers_ai.model"),
         ({"model": "../bad"}, "tier0.workers_ai.model"),
+        ({"model": "@cf/meta/llama-3-8b-instruct"}, "tier0.workers_ai.model"),
         ({"timeout_seconds": 0}, "tier0.workers_ai.timeout_seconds"),
         ({"timeout_seconds": float("inf")}, "tier0.workers_ai.timeout_seconds"),
         ({"daily_token_cap": 0}, "tier0.workers_ai.daily_token_cap"),

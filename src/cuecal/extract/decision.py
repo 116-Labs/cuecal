@@ -15,7 +15,12 @@ from enum import StrEnum
 from typing import Any
 
 from cuecal import db
-from cuecal.config import DEFAULT_WORKERS_AI_MODEL, Tier0Config, WorkersAIConfig
+from cuecal.config import (
+    DEFAULT_WORKERS_AI_MODEL,
+    WORKERS_AI_MODEL_SELECTORS,
+    Tier0Config,
+    WorkersAIConfig,
+)
 from cuecal.extract.providers import (
     ProviderError,
     ProviderResult,
@@ -285,6 +290,7 @@ class WorkersAIClient:
         self.high = high
         self.low = low
         self.model = model
+        self.model_selector = WORKERS_AI_MODEL_SELECTORS[model]
         self.timeout = timeout
         self.base_url = (base_url or WORKERS_AI_BASE_URL).rstrip("/")
 
@@ -313,7 +319,7 @@ class WorkersAIClient:
         try:
             body = _post_json(
                 url,
-                {**build_request(text), "model": self.model},
+                {**build_request(text), "model": self.model_selector},
                 headers={"Authorization": f"Bearer {key}"},
                 timeout=self.timeout,
             )

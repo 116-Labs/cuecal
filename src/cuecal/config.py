@@ -109,6 +109,11 @@ _PROVISION_MODES = ("organizer_only", "any_linkless", "off")
 _TRANSPARENCIES = ("opaque", "transparent")
 _TOKEN_PREFIXES = ("xoxb-", "xoxp-", "ya29.", "1//", "sk-", "cfut_")
 DEFAULT_WORKERS_AI_MODEL = "@cf/cloudflare/clef-flash"
+# Workers AI model id -> the short selector its request body requires.
+WORKERS_AI_MODEL_SELECTORS = {
+    "@cf/cloudflare/clef-flash": "clef-flash",
+    "@cf/cloudflare/clef": "clef",
+}
 DEFAULT_WORKERS_AI_DAILY_TOKEN_CAP = 100_000
 _TABLE_HEADER = re.compile(r"^\s*\[\s*([^\]]+?)\s*\]\s*(#.*)?$")
 _TARGET_KEY = re.compile(r"^\s*target_calendar\s*=")
@@ -687,13 +692,9 @@ def _parse_workers_ai(t0: dict[str, Any], secrets: dict[str, str]) -> WorkersAIC
     if key_ref and key_ref not in secrets:
         raise ConfigError("tier0.workers_ai.api_key_secret must name an entry under [secrets]")
     model = _string(wa, "model", "tier0.workers_ai", default.model)
-    if (
-        not model
-        or any(c.isspace() for c in model)
-        or ".." in model
-        or any(c in model for c in "?#")
-    ):
-        raise ConfigError("tier0.workers_ai.model must be a non-empty model identifier")
+    if model not in WORKERS_AI_MODEL_SELECTORS:
+        supported = ", ".join(WORKERS_AI_MODEL_SELECTORS)
+        raise ConfigError(f"tier0.workers_ai.model must be one of: {supported}")
     timeout = _positive(wa, "timeout_seconds", "tier0.workers_ai", default.timeout_seconds)
     if not math.isfinite(timeout):
         raise ConfigError("tier0.workers_ai.timeout_seconds must be a finite number")
