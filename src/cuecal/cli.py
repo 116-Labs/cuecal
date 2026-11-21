@@ -643,6 +643,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                         else:
                             if not is_valid:
                                 reason = val_reason
+                            elif is_linkless and outcome.pending_reason is not None:
+                                reason = f"linkless invite; {outcome.pending_reason}"
                             elif is_linkless:
                                 reason = "linkless invite"
                             elif outcome.pending_reason is not None:

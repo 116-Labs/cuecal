@@ -621,6 +621,51 @@ def test_cli_run_queues_a_tier_2_5_confirmed_start_above_auto_create(tmp_path, m
     assert row["reason"] == reason
 
 
+def test_cli_run_keeps_the_tier_2_5_reason_for_a_linkless_confirmed_start(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from cuecal.extract.escalate import Outcome
+    from cuecal.models import MeetingCandidate, Message
+
+    assert cli.main(["init"]) == 0
+    created = []
+
+    class Sink:
+        name = "google-calendar"
+
+        def create(self, candidate):
+            created.append(candidate.title)
+            return "evt"
+
+    msg = Message(id="msg1", source="dummy", sender="a", ts=datetime.now(UTC), text="x")
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source([msg]) if kind == "sources" else Sink(),
+    )
+    start = datetime.now(UTC) + timedelta(days=1)
+    confirmed = MeetingCandidate(
+        title="T",
+        start=start,
+        end=start + timedelta(minutes=30),
+        confidence=0.95,
+        tier="local",
+    )
+    reason = "tier 2.5: start 2026-10-20T15:00:00+00:00[UTC] confirmed at 0.95"
+    _counting_extract(monkeypatch, [], MeetingCandidate(title="T"))
+    monkeypatch.setattr(
+        "cuecal.extract.escalate.Escalator.process",
+        lambda self, message, cand, **kw: Outcome(confirmed, pending_reason=reason),
+    )
+    _set_dummy_source(tmp_path / "config.toml")
+
+    assert cli.main(["run", "--once"]) == 0
+
+    assert created == []
+    [row] = db.list_pending(db.connect(tmp_path / "state.db"))
+    assert "linkless invite" in row["reason"]
+    assert reason in row["reason"]
+
+
 def test_cli_run_records_near_miss_and_queued_messages_as_seen(tmp_path, monkeypatch):
     from datetime import datetime
 
