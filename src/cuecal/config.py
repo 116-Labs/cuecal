@@ -64,7 +64,8 @@ auto_create = 0.85
 
 # Tier 0 decision model (#21), optional: off until [tier0] is set, so extraction uses the regex
 # gate by default. If the local host is unavailable, cuecal falls back to the regex gate (after
-# optional [tier0.workers_ai] below). Thresholds are provisional until the #47 eval.
+# optional [tier0.workers_ai] below). [llm.check] asks this host too. Thresholds are provisional
+# until the #47 eval.
 # [tier0]
 # host = "http://localhost:8080"
 # high = 0.8                      # new_invite at or above this continues to Tier 1/2
