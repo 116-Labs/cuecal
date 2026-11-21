@@ -612,14 +612,14 @@ def _check_llm(timezone="UTC", **check):
     )
 
 
-def _checked(conn, log, local_answer=LOW, llm=None):
+def _checked(conn, log, local_answer=LOW, llm=None, paid_answer=GOOD, check=None):
     return Escalator(
         llm or _check_llm(),
         conn=conn,
         local=LoggedProvider("ollama", local_answer, log),
-        paid=LoggedProvider("anthropic", GOOD, log),
+        paid=LoggedProvider("anthropic", paid_answer, log),
         now=_now,
-        check=Tier0Client(host=CLEF, high=0.8, low=0.3, retries=0),
+        check=check or Tier0Client(host=CLEF, high=0.8, low=0.3, retries=0),
     )
 
 
@@ -798,3 +798,79 @@ def test_tier_2_5_drop_reason_is_the_telemetry_outcome(conn, monkeypatch):
     _checked(conn, log).process(_msg(), _partial())
     [row] = db.list_extraction_telemetry(conn)
     assert row["outcome"] == "tier 2.5: not_invite at 0.95"
+
+
+PAID_DOWN = ProviderError("HTTP 529")
+
+
+def _tier_2_5_warnings(caplog):
+    return [r for r in caplog.records if "tier 2.5 unavailable" in r.getMessage()]
+
+
+def test_tier_2_5_busy_host_waits_the_timeout_then_goes_to_tier_3_and_the_next_candidate_asks(
+    conn, monkeypatch
+):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.95))
+    check = Tier0Client(host=CLEF, high=0.8, low=0.3, retries=0, timeout=0.2)
+    esc = _checked(conn, log, paid_answer=PAID_DOWN, check=check)
+    with decision._host_lock(CLEF):
+        outcome = esc.process(_msg("m1"), _partial())
+    assert log == ["ollama", "anthropic"]
+    assert "tier 2.5 busy" in outcome.pending_reason
+    assert outcome.drop_reason is None
+    log.clear()
+    second = esc.process(_msg("m2"), _partial())
+    assert log == ["ollama", "clef"]
+    assert second.drop_reason == "tier 2.5: not_invite at 0.95"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        ProviderUnreachable("connection refused"),
+        ProviderError("timed out"),
+        {decision.QUESTION_ID: {"probabilities": {"new_invite": 0.9}}},
+    ],
+    ids=["refused", "timeout", "malformed"],
+)
+def test_tier_2_5_unavailable_host_goes_to_tier_3_with_the_reason_in_the_pending_note(
+    conn, monkeypatch, reply
+):
+    log = []
+    _serve_clef(monkeypatch, log, reply)
+    outcome = _checked(conn, log, paid_answer=PAID_DOWN).process(_msg(), _partial())
+    assert log == ["ollama", "clef", "anthropic"]
+    assert "tier 2.5 unavailable: tier 0 host" in outcome.pending_reason
+    assert "no usable answer after 1 tries" in outcome.pending_reason
+
+
+def test_tier_2_5_unavailable_once_skips_clef_for_the_rest_of_the_run_with_one_warning(
+    conn, monkeypatch, caplog
+):
+    log = []
+    _serve_clef(monkeypatch, log, ProviderUnreachable("connection refused"))
+    esc = _checked(conn, log, paid_answer=PAID_DOWN)
+    with caplog.at_level(logging.INFO, logger="cuecal.extract"):
+        first = esc.process(_msg("m1"), _partial())
+        log.clear()
+        second = esc.process(_msg("m2"), _partial())
+        third = esc.process(_msg("m3"), _partial())
+    assert log == ["ollama", "anthropic", "ollama", "anthropic"]
+    assert "tier 2.5 unavailable" in first.pending_reason
+    assert "tier 2.5 unavailable" in second.pending_reason
+    assert "tier 2.5 unavailable" in third.pending_reason
+    assert len(_tier_2_5_warnings(caplog)) == 1
+
+
+def test_tier_2_5_unavailable_in_a_previous_run_does_not_stop_the_next_run_asking(
+    conn, monkeypatch
+):
+    log = []
+    _serve_clef(monkeypatch, log, ProviderUnreachable("connection refused"))
+    _checked(conn, log).process(_msg("m1"), _partial())
+    log.clear()
+    _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.95))
+    outcome = _checked(conn, log).process(_msg("m2"), _partial())
+    assert log == ["ollama", "clef"]
+    assert outcome.drop_reason == "tier 2.5: not_invite at 0.95"

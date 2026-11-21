@@ -285,6 +285,34 @@ def test_requests_to_one_host_are_serialized_by_default():
     assert _concurrency(serialize=True) == 1
 
 
+def test_bounded_and_unbounded_callers_share_one_host_lock():
+    with serving((200, answer(new_invite=0.9), 0.3)) as server:
+        c = client(server.host)
+        threads = [
+            threading.Thread(target=c.classify, args=("text",)),
+            threading.Thread(target=c.classify, args=("text",), kwargs={"lock_timeout": 5.0}),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(server.requests) == 2
+        assert server.max_active == 1
+
+
+def test_a_held_host_lock_raises_tier0_busy_after_the_bounded_wait_without_a_request():
+    with serving((200, answer(new_invite=0.9), 0)) as server:
+        c = client(server.host, retries=2)
+        with decision._host_lock(c.host):
+            started = time.monotonic()
+            with pytest.raises(decision.Tier0Busy):
+                c.classify("text", lock_timeout=0.2)
+            elapsed = time.monotonic() - started
+        assert c.classify("text", lock_timeout=0.2).label == "new_invite"
+    assert 0.15 <= elapsed < 1.0
+    assert len(server.requests) == 1
+
+
 def test_serialization_can_be_turned_off():
     assert _concurrency(serialize=False) > 1
 
