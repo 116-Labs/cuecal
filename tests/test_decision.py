@@ -22,12 +22,13 @@ from cuecal.extract.decision import (
     Route,
     Tier0Client,
     Tier0Unavailable,
+    WorkersAIClient,
     build_request,
     parse_answer,
     record_near_miss,
     route_for,
 )
-from cuecal.extract.providers import ProviderError
+from cuecal.extract.providers import ProviderError, UnusableAnswer
 from cuecal.models import Message
 
 
@@ -58,8 +59,9 @@ class MockLlamaServer:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802 - http.server API
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                headers = {k.lower(): v for k, v in self.headers.items()}
                 with mock._lock:
-                    mock.requests.append({"path": self.path, "body": body})
+                    mock.requests.append({"path": self.path, "headers": headers, "body": body})
                     mock.active += 1
                     mock.max_active = max(mock.max_active, mock.active)
                 try:
@@ -345,3 +347,110 @@ def test_tier0_config_is_off_unless_present():
 def test_tier0_config_validation(table, message):
     with pytest.raises(ConfigError, match=message):
         parse_config({"tier0": table})
+
+
+def test_workers_ai_sends_five_class_request_and_parses_cloudflare_envelope():
+    envelope = {
+        "success": True,
+        "result": {
+            "answers": answer(new_invite=0.88, not_invite=0.12),
+            "usage": {"prompt_tokens": 60, "completion_tokens": 12, "total_tokens": 72},
+        },
+    }
+    with serving((200, envelope, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct-42",
+            api_key=lambda: "cf-secret-token",
+            high=0.8,
+            low=0.3,
+            base_url=server.host,
+        )
+        res = cloud.classify("lunch sync tomorrow at noon?")
+    [req] = server.requests
+    assert req["path"] == "/accounts/acct-42/ai/run/@cf/cloudflare/clef-flash"
+    assert req["headers"]["authorization"] == "Bearer cf-secret-token"
+    assert req["body"] == {
+        **build_request("lunch sync tomorrow at noon?"),
+        "model": "clef-flash",
+    }
+    assert res.decision.route is Route.TIER1_2
+    assert (res.input_tokens, res.output_tokens, res.usage_known) == (60, 12, True)
+
+
+@pytest.mark.parametrize(
+    ("model", "selector"),
+    [("@cf/cloudflare/clef-flash", "clef-flash"), ("@cf/cloudflare/clef", "clef")],
+)
+def test_workers_ai_keeps_full_model_id_in_url_and_short_selector_in_body(model, selector):
+    envelope = {"success": True, "result": {"answers": answer(new_invite=0.9)}}
+    with serving((200, envelope, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct-42",
+            api_key=lambda: "cf-secret-token",
+            high=0.8,
+            low=0.3,
+            model=model,
+            base_url=server.host,
+        )
+        cloud.classify("lunch sync tomorrow at noon?")
+    [req] = server.requests
+    assert req["path"] == f"/accounts/acct-42/ai/run/{model}"
+    assert req["body"]["model"] == selector
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {},
+        {"prompt_tokens": 40},
+        {"prompt_tokens": True, "completion_tokens": 5},
+        {"prompt_tokens": -1, "completion_tokens": 5},
+        {"prompt_tokens": "40", "completion_tokens": 5},
+    ],
+)
+def test_workers_ai_unusable_usage_reports_unknown_never_zero(usage):
+    payload = {**answer(new_invite=0.9), **({} if usage is None else {"usage": usage})}
+    with serving((200, payload, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct", api_key=lambda: "k", high=0.8, low=0.3, base_url=server.host
+        )
+        res = cloud.classify("text")
+    assert res.usage_known is False
+
+
+def test_workers_ai_unusable_answer_preserves_billed_usage():
+    payload = {"result": {}, "usage": {"prompt_tokens": 50, "completion_tokens": 10}}
+    with serving((200, payload, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct", api_key=lambda: "k", high=0.8, low=0.3, base_url=server.host
+        )
+        with pytest.raises(UnusableAnswer) as info:
+            cloud.classify("text")
+    assert (info.value.usage.input_tokens, info.value.usage.output_tokens) == (50, 10)
+    assert info.value.usage.usage_known is True
+
+
+@pytest.mark.parametrize("status", [500, 429])
+def test_workers_ai_http_error_after_send_reports_unknown_usage(status):
+    with serving((status, {}, 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct", api_key=lambda: "k", high=0.8, low=0.3, base_url=server.host
+        )
+        with pytest.raises(UnusableAnswer) as info:
+            cloud.classify("text")
+    assert info.value.usage.usage_known is False
+
+
+@pytest.mark.parametrize(
+    "getter",
+    [lambda: None, lambda: (_ for _ in ()).throw(RuntimeError("vault locked"))],
+)
+def test_workers_ai_missing_key_fails_before_sending_http_request(getter):
+    with serving((200, answer(new_invite=0.9), 0)) as server:
+        cloud = WorkersAIClient(
+            account_id="acct", api_key=getter, high=0.8, low=0.3, base_url=server.host
+        )
+        with pytest.raises(ProviderError, match="keyring"):
+            cloud.classify("text")
+        assert server.requests == []

@@ -2554,3 +2554,412 @@ def test_doctor_reports_tier3_key_present(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     cli.main(["doctor"])
     assert "llm.paid: ok (anthropic m)" in capsys.readouterr().out
+
+
+TEMPLATE_INVITE = (
+    "Topic: Architecture Sync\n"
+    "Time: Oct 3, 2030 02:00 PM Coordinated Universal Time\n"
+    "https://zoom.us/j/81234567890"
+)
+
+
+def _tier0_answer(**probs):
+    from cuecal.extract.decision import CLASSES, QUESTION_ID
+
+    full = {name: 0.0 for name in CLASSES} | probs
+    top = max(full, key=lambda k: full[k])
+    return {
+        QUESTION_ID: {
+            "type": "choice",
+            "choice": top,
+            "probabilities": full,
+            "confidence": full[top],
+        }
+    }
+
+
+def _tier0_server(reply):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Server:
+        def __init__(self):
+            self.requests = []
+            lock = threading.Lock()
+            outer = self
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    headers = {k.lower(): v for k, v in self.headers.items()}
+                    with lock:
+                        outer.requests.append({"path": self.path, "headers": headers, "body": body})
+                    status, payload = reply(body)
+                    raw = json.dumps(payload).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+
+                def log_message(self, *args):
+                    pass
+
+            self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            self.server.daemon_threads = True
+            self.host = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+        def __enter__(self):
+            threading.Thread(
+                target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+            ).start()
+            return self
+
+        def __exit__(self, *exc):
+            self.server.shutdown()
+            self.server.server_close()
+
+    return Server()
+
+
+def _setup_tier0_run(tmp_path, monkeypatch, messages, extra_toml="", secret_ref=None):
+    assert cli.main(["init"]) == 0
+    config_path = tmp_path / "config.toml"
+    text = config_path.read_text()
+    if secret_ref is not None:
+        key, entry = secret_ref
+        text = text.replace("[secrets]\n", f'[secrets]\n{key} = "{entry}"\n')
+    config_path.write_text(text + "\n" + extra_toml)
+    _set_dummy_source(config_path)
+    sink = _RecordingSink()
+    monkeypatch.setattr(
+        "cuecal.cli.registry.get",
+        lambda kind, name: _replaying_source(messages) if kind == "sources" else sink,
+    )
+    return sink
+
+
+def test_cli_run_without_tier0_uses_regex_gate_without_hosts_or_degraded_warning(
+    tmp_path, monkeypatch, caplog
+):
+    from datetime import UTC, datetime
+
+    from cuecal.extract import decision
+    from cuecal.models import Message
+
+    monkeypatch.setattr(
+        decision.Tier0Client,
+        "classify",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("local Tier 0 must not be called")),
+    )
+    monkeypatch.setattr(
+        decision.WorkersAIClient,
+        "classify",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Workers AI must not be called")),
+    )
+    messages = [
+        Message(id="m_inv", source="dummy", sender="a", ts=datetime.now(UTC), text=TEMPLATE_INVITE),
+        Message(id="m_txt", source="dummy", sender="a", ts=datetime.now(UTC), text="hello there"),
+    ]
+    sink = _setup_tier0_run(tmp_path, monkeypatch, messages)
+    with caplog.at_level("WARNING", logger="cuecal.extract"):
+        assert cli.main(["run", "--once"]) == 0
+    assert [c.meeting_id for c in sink.created] == ["81234567890"]
+    assert not any("degraded" in r.getMessage() for r in caplog.records)
+
+
+def test_cli_run_tier0_local_routes_every_decision_without_calling_fallbacks(
+    tmp_path, monkeypatch, capsys, caplog
+):
+    from datetime import UTC, datetime
+
+    from cuecal.extract import tier0
+    from cuecal.models import Message
+
+    monkeypatch.setattr(
+        tier0,
+        "gate",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("regex gate must not run")),
+    )
+    by_state = {
+        TEMPLATE_INVITE: _tier0_answer(new_invite=0.92),
+        f"{TEMPLATE_INVITE}\n(unsure)": _tier0_answer(new_invite=0.55, not_invite=0.45),
+        "moved standup to 4pm": _tier0_answer(reschedule=0.88),
+        "standup cancelled today": _tier0_answer(cancel=0.91),
+        "recording from yesterday": _tier0_answer(mentions_meeting=0.87),
+        "maybe catch up sometime": _tier0_answer(new_invite=0.24, mentions_meeting=0.22),
+    }
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [
+        Message(id=f"m{i}", source="dummy", sender="priya", ts=now, text=text)
+        for i, text in enumerate(by_state, 1)
+    ]
+    with (
+        _tier0_server(lambda body: (200, by_state[body["state"]])) as local_srv,
+        _tier0_server(lambda _body: (200, {})) as cloud_srv,
+    ):
+        monkeypatch.setattr("cuecal.extract.decision.WORKERS_AI_BASE_URL", cloud_srv.host)
+        monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "cf-token")
+        toml = (
+            f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n\n'
+            '[tier0.workers_ai]\nenabled = true\naccount_id = "acct"\napi_key_secret = "cf"\n'
+        )
+        sink = _setup_tier0_run(
+            tmp_path, monkeypatch, messages, toml, secret_ref=("cf", "cuecal-cf")
+        )
+        capsys.readouterr()
+        with caplog.at_level("WARNING", logger="cuecal.extract"):
+            assert cli.main(["run", "--once"]) == 0
+        assert cloud_srv.requests == []
+        assert len(local_srv.requests) == 6
+
+    assert [r for r in caplog.records if r.name == "cuecal.extract"] == []
+    assert [c.meeting_id for c in sink.created] == ["81234567890"]
+
+    conn = db.connect(tmp_path / "state.db")
+    pending = db.list_pending(conn)
+    assert [(row["message_id"], row["confidence"]) for row in pending] == [("m2", 0.55)]
+    assert "tier 0 pending" in pending[0]["reason"]
+
+    telemetry = {r["message_id"]: r for r in db.list_extraction_telemetry(conn)}
+    assert telemetry["m3"]["tier"] == "tier0" and telemetry["m3"]["outcome"] == "reschedule"
+    assert telemetry["m4"]["tier"] == "tier0" and telemetry["m4"]["outcome"] == "cancel"
+    assert "m5" not in telemetry
+
+    misses = db.list_near_misses(conn)
+    assert [m["message_id"] for m in misses] == ["m6"]
+    for i in range(1, 7):
+        assert db.is_seen(conn, "dummy", f"m{i}")
+
+    assert cli.main(["misses"]) == 0
+    assert "dummy:m6" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("label", ["not_invite", "mentions_meeting"])
+def test_cli_run_tier0_negative_decision_keeps_parsed_ics_invitation(
+    tmp_path, monkeypatch, label
+):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    ics = (
+        "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:ics-1\r\n"
+        "DTSTART:20301003T210000Z\r\nDTEND:20301003T220000Z\r\nSUMMARY:Planning\r\n"
+        "END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [
+        Message("m1", "dummy", "a", now, "see attached", None, (ics,)),
+        Message("m2", "dummy", "a", now, "no attachment here"),
+    ]
+    with _tier0_server(lambda _body: (200, _tier0_answer(**{label: 0.95}))) as local_srv:
+        toml = f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n'
+        sink = _setup_tier0_run(tmp_path, monkeypatch, messages, toml)
+        assert cli.main(["run", "--once"]) == 0
+
+    assert sink.created == []
+    conn = db.connect(tmp_path / "state.db")
+    assert [p["message_id"] for p in db.list_pending(conn)] == ["m1"]
+    assert db.is_seen(conn, "dummy", "m1") and db.is_seen(conn, "dummy", "m2")
+
+
+def test_cli_run_dry_run_never_calls_workers_ai_or_records_usage(tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [Message("m1", "dummy", "a", now, TEMPLATE_INVITE)]
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: "cf-key")
+    with (
+        _tier0_server(lambda _body: (503, {})) as local_srv,
+        _tier0_server(lambda _body: (200, {})) as cloud_srv,
+    ):
+        monkeypatch.setattr("cuecal.extract.decision.WORKERS_AI_BASE_URL", cloud_srv.host)
+        toml = (
+            f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n\n'
+            '[tier0.workers_ai]\nenabled = true\naccount_id = "acct"\napi_key_secret = "cf"\n'
+        )
+        sink = _setup_tier0_run(
+            tmp_path, monkeypatch, messages, toml, secret_ref=("cf", "cuecal-cf")
+        )
+        assert cli.main(["run", "--once", "--dry-run"]) == 0
+        assert cloud_srv.requests == []
+
+    assert sink.created == []
+    conn = db.connect(tmp_path / "state.db")
+    assert conn.execute("SELECT COUNT(*) FROM tier0_usage").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "workers_ai_toml",
+    [
+        "",
+        "[tier0.workers_ai]\nenabled = false\n",
+    ],
+    ids=["absent", "disabled"],
+)
+def test_cli_run_tier0_local_unavailable_with_cloud_off_runs_regex_and_warns_once(
+    tmp_path, monkeypatch, caplog, workers_ai_toml
+):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [
+        Message(id="m1", source="dummy", sender="a", ts=now, text=TEMPLATE_INVITE),
+        Message(id="m2", source="dummy", sender="a", ts=now, text=LINK_ONLY_TEXT),
+        Message(id="m3", source="dummy", sender="a", ts=now, text="casual chat"),
+    ]
+    with (
+        _tier0_server(lambda _body: (503, {})) as local_srv,
+        _tier0_server(lambda _body: (200, {})) as cloud_srv,
+    ):
+        monkeypatch.setattr("cuecal.extract.decision.WORKERS_AI_BASE_URL", cloud_srv.host)
+        toml = f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n\n{workers_ai_toml}'
+        sink = _setup_tier0_run(tmp_path, monkeypatch, messages, toml)
+        with caplog.at_level("WARNING", logger="cuecal.extract"):
+            assert cli.main(["run", "--once"]) == 0
+        assert cloud_srv.requests == []
+
+    assert [c.meeting_id for c in sink.created] == ["81234567890"]
+    conn = db.connect(tmp_path / "state.db")
+    assert [p["message_id"] for p in db.list_pending(conn)] == ["m2"]
+    assert [m["message_id"] for m in db.list_near_misses(conn)] == ["m3"]
+    warnings = [
+        r for r in caplog.records if r.name == "cuecal.extract" and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1
+    assert local_srv.host in warnings[0].getMessage()
+    assert "degraded" in warnings[0].getMessage()
+
+
+def test_cli_run_tier0_local_unavailable_routes_via_workers_ai_when_enabled(
+    tmp_path, monkeypatch, caplog
+):
+    from datetime import UTC, datetime
+
+    from cuecal.models import Message
+
+    by_state = {
+        TEMPLATE_INVITE: _tier0_answer(new_invite=0.93),
+        "let us push this to Friday": _tier0_answer(reschedule=0.85),
+        "coffee sometime?": _tier0_answer(new_invite=0.22, not_invite=0.21),
+    }
+
+    def cloud_reply(body):
+        return (
+            200,
+            {
+                "success": True,
+                "result": by_state[body["state"]],
+                "usage": {"prompt_tokens": 25, "completion_tokens": 8},
+            },
+        )
+
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [
+        Message(id=f"m{i}", source="dummy", sender="a", ts=now, text=text)
+        for i, text in enumerate(by_state, 1)
+    ]
+    monkeypatch.setattr(
+        "cuecal.secrets.get_secret", lambda ref: "cf-key" if ref == "cf-kr" else None
+    )
+    with (
+        _tier0_server(lambda _body: (503, {})) as local_srv,
+        _tier0_server(cloud_reply) as cloud_srv,
+    ):
+        monkeypatch.setattr("cuecal.extract.decision.WORKERS_AI_BASE_URL", cloud_srv.host)
+        toml = (
+            f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n\n'
+            '[tier0.workers_ai]\nenabled = true\naccount_id = "acct-9"\napi_key_secret = "cf"\n'
+            "daily_token_cap = 500\n"
+        )
+        sink = _setup_tier0_run(
+            tmp_path, monkeypatch, messages, toml, secret_ref=("cf", "cf-kr")
+        )
+        with caplog.at_level("WARNING", logger="cuecal.extract"):
+            assert cli.main(["run", "--once"]) == 0
+        assert len(cloud_srv.requests) == 3
+        assert cloud_srv.requests[0]["headers"]["authorization"] == "Bearer cf-key"
+        assert cloud_srv.requests[0]["path"] == "/accounts/acct-9/ai/run/@cf/cloudflare/clef-flash"
+
+    assert [r for r in caplog.records if r.name == "cuecal.extract"] == []
+    assert [c.meeting_id for c in sink.created] == ["81234567890"]
+    conn = db.connect(tmp_path / "state.db")
+    assert [m["message_id"] for m in db.list_near_misses(conn)] == ["m3"]
+    telemetry = {r["message_id"]: r for r in db.list_extraction_telemetry(conn)}
+    assert telemetry["m2"]["provider"] == "workers-ai"
+    assert telemetry["m2"]["outcome"] == "reschedule"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["transport", "unusable", "unknown_usage", "cap_reached", "missing_secret"],
+)
+def test_cli_run_tier0_workers_ai_failure_modes_fall_back_to_regex_with_single_warning(
+    tmp_path, monkeypatch, caplog, scenario
+):
+    from datetime import UTC, datetime, timedelta
+
+    from cuecal.models import Message
+
+    now = datetime(2030, 10, 1, 12, 0, tzinfo=UTC)
+    messages = [
+        Message(id="m1", source="dummy", sender="a", ts=now, text="room 4B tomorrow at 2pm"),
+        Message(id="m2", source="dummy", sender="a", ts=now, text=LINK_ONLY_TEXT),
+    ]
+    secret = None if scenario == "missing_secret" else "cf-secret"
+    monkeypatch.setattr("cuecal.secrets.get_secret", lambda ref: secret)
+
+    usage = {"prompt_tokens": 10, "completion_tokens": 2}
+    if scenario == "unusable":
+        cloud_payload = {"result": {}, "usage": usage}
+    elif scenario == "unknown_usage":
+        cloud_payload = {"result": _tier0_answer(new_invite=0.95)}
+    else:
+        cloud_payload = {"result": _tier0_answer(new_invite=0.95), "usage": usage}
+
+    with _tier0_server(lambda _body: (200, {})) as closed_srv:
+        dead_host = closed_srv.host
+
+    with (
+        _tier0_server(lambda _body: (503, {})) as local_srv,
+        _tier0_server(lambda _body: (200, cloud_payload)) as cloud_srv,
+    ):
+        cloud_host = dead_host if scenario == "transport" else cloud_srv.host
+        monkeypatch.setattr("cuecal.extract.decision.WORKERS_AI_BASE_URL", cloud_host)
+        toml = (
+            '[llm]\ntimezone = "UTC"\n\n'
+            f'[tier0]\nhost = "{local_srv.host}"\nretries = 0\n\n'
+            '[tier0.workers_ai]\nenabled = true\naccount_id = "acct"\napi_key_secret = "cf"\n'
+            "timeout_seconds = 0.5\ndaily_token_cap = 100\n"
+        )
+        sink = _setup_tier0_run(
+            tmp_path, monkeypatch, messages, toml, secret_ref=("cf", "cf-kr")
+        )
+        if scenario == "cap_reached":
+            conn_pre = db.connect(tmp_path / "state.db")
+            today = datetime.now(UTC).date()
+            for day in (today, today + timedelta(days=1)):
+                db.add_tier0_usage(conn_pre, day.isoformat(), input_tokens=100, output_tokens=0)
+            conn_pre.close()
+        with caplog.at_level("WARNING", logger="cuecal.extract"):
+            assert cli.main(["run", "--once"]) == 0
+        if scenario in ("cap_reached", "missing_secret"):
+            assert cloud_srv.requests == []
+
+    assert sink.created == []
+    conn = db.connect(tmp_path / "state.db")
+    assert [p["message_id"] for p in db.list_pending(conn)] == ["m2"]
+    assert [m["message_id"] for m in db.list_near_misses(conn)] == ["m1"]
+    warnings = [
+        r for r in caplog.records if r.name == "cuecal.extract" and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1
+    assert local_srv.host in warnings[0].getMessage()
+    assert "degraded" in warnings[0].getMessage()
+    assert secret is None or secret not in caplog.text
