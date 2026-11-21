@@ -6,11 +6,12 @@ so the caller routes it to pending; nothing here raises into the run.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from cuecal import db, notify, secrets
@@ -27,13 +28,53 @@ PAID_TIER = "paid"
 UNKNOWN_TIMEZONE = "recipient timezone unknown; set [llm].timezone"
 LOCAL_UNREACHABLE = "tier 2 skipped: local model unreachable earlier this run"
 CHECK_UNAVAILABLE_EARLIER = "tier 2.5 unavailable: decision model failed earlier this run"
+TIER3_UNCONFIGURED = "tier 3 off: no [llm.paid] table"
 NEAR_MISS_LABELS = ("not_invite", "mentions_meeting")
 LOG_ONLY_LABELS = ("reschedule", "cancel")
+# The duration Tier 2's prompt assumes when a message states no end.
+CONFIRMED_DURATION = timedelta(minutes=30)
 
 
 def needs_escalation(cand: MeetingCandidate) -> bool:
     """A regex-fallback partial or anything below Tier 1 HIGH, as `cuecal eval` counts it."""
     return cand.tier == "regex" or cand.confidence < tier1.HIGH
+
+
+def start_options(
+    draft: tier2.LLMFields, partial: MeetingCandidate, timezone: str
+) -> list[tuple[str, datetime]]:
+    """The distinct starts in Gemma's answer and the Tier 0/1 partial, labelled for the model."""
+    found: list[tuple[datetime, str]] = []
+    if draft.start is not None:
+        found.append((draft.start, draft.tz))
+    if partial.start is not None:
+        zone = tier2.recipient_timezone(timezone, partial.tz) or timezone
+        start = partial.start
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=ZoneInfo(zone))
+        found.append((start, zone))
+    options: list[tuple[str, datetime]] = []
+    for start, zone in found:
+        if all(start != seen for _, seen in options):
+            options.append((decision.format_start(start, zone), start))
+    return options
+
+
+def _on_to_tier3(note: str, cand: MeetingCandidate) -> str:
+    logger.info("%s; %r goes on to tier 3", note, cand.title)
+    return note
+
+
+def confirmed_candidate(
+    partial: MeetingCandidate, gate: tier2.GateResult, start: datetime
+) -> MeetingCandidate:
+    """Gemma's fields with the confirmed start; an end Gemma got wrong becomes start + 30 min."""
+    draft = gate.draft
+    start = start.astimezone(ZoneInfo(draft.tz))
+    end = draft.end
+    if gate.rule == tier2.END_RULE or end <= start:
+        end = start + CONFIRMED_DURATION
+    return tier2.merge(partial, dataclasses.replace(draft, start=start, end=end), LOCAL_TIER)
 
 
 @dataclass
@@ -170,10 +211,12 @@ class Escalator:
         timezone = resolved or "UTC"
         outcome = Outcome(cand)
         notes: list[str] = []
+        gate: tier2.GateResult | None = None
         if self.local is not None and self._local_unreachable:
             notes.append(LOCAL_UNREACHABLE)
         elif self.local is not None:
             attempt = self._attempt(self.local, message, cand, LOCAL_TIER, timezone)
+            gate = attempt.gate
             outcome.attempts.append(attempt)
             if attempt.passed:
                 outcome.candidate = tier2.merge(cand, attempt.gate.fields, LOCAL_TIER)
@@ -186,10 +229,13 @@ class Escalator:
                 self._local_unreachable = True
                 logger.warning("tier 2 unreachable; skipped for the rest of this run")
         if self.local is not None and self.check is not None:
-            outcome.drop_reason = self._invite_check(self.check, message, cand, notes)
-            if outcome.drop_reason is not None:
+            note = self._tier_2_5(self.check, message, outcome, gate, timezone)
+            if note is None:
                 return outcome
-        if self.llm.paid is not None:
+            notes.append(note)
+        if self.llm.paid is None:
+            notes.append(TIER3_UNCONFIGURED)
+        else:
             paid_attempt = self._paid(message, cand, timezone, notes)
             if paid_attempt is not None:
                 outcome.attempts.append(paid_attempt)
@@ -202,33 +248,60 @@ class Escalator:
         outcome.pending_reason = "; ".join(notes)
         return outcome
 
-    def _invite_check(
-        self, check: Tier0Client, message: Message, cand: MeetingCandidate, notes: list[str]
+    def _tier_2_5(
+        self,
+        check: Tier0Client,
+        message: Message,
+        outcome: Outcome,
+        gate: tier2.GateResult | None,
+        timezone: str,
     ) -> str | None:
-        """Tier 2.5 (#82): the drop reason when Clef-flash decisively says "no new invite"."""
+        """Tier 2.5 (#82): None once it drops or pends ``outcome``, else the note for Tier 3."""
         if self._check_unavailable:
-            notes.append(CHECK_UNAVAILABLE_EARLIER)
-            return None
+            return CHECK_UNAVAILABLE_EARLIER
+        cand = outcome.candidate
         try:
             answer = check.classify(message.text, lock_timeout=check.timeout)
-        except Tier0Busy as exc:
-            notes.append(f"tier 2.5 busy: {exc}")
-            logger.info("tier 2.5 busy for %r: %s", cand.title, exc)
-            return None
-        except Tier0Unavailable as exc:
-            self._check_unavailable = True
-            notes.append(f"tier 2.5 unavailable: {exc}")
-            logger.warning("tier 2.5 unavailable; skipped for the rest of this run: %s", exc)
-            return None
+        except (Tier0Busy, Tier0Unavailable) as exc:
+            return self._check_failed("tier 2.5", exc)
         verdict = f"tier 2.5: {answer.label} at {answer.probability:.2f}"
-        decisive = answer.probability >= self.llm.check.invite_threshold
-        if not decisive or answer.label not in NEAR_MISS_LABELS + LOG_ONLY_LABELS:
-            logger.info("%s; %r goes on to tier 3", verdict, cand.title)
+        if answer.probability < self.llm.check.invite_threshold:
+            return _on_to_tier3(f"{verdict}, inconclusive", cand)
+        if answer.label in NEAR_MISS_LABELS + LOG_ONLY_LABELS:
+            if answer.label in NEAR_MISS_LABELS and self.record:
+                decision.record_near_miss(self.conn, message, answer, reason=verdict)
+            logger.info("%s; %r dropped before tier 3", verdict, cand.title)
+            outcome.drop_reason = verdict
             return None
-        if answer.label in NEAR_MISS_LABELS and self.record:
-            decision.record_near_miss(self.conn, message, answer, reason=verdict)
-        logger.info("%s; %r dropped before tier 3", verdict, cand.title)
-        return verdict
+        if gate is None or gate.draft is None:
+            return _on_to_tier3(f"{verdict}; this tier 2 failure gets no start check", cand)
+        starts = start_options(gate.draft, cand, timezone)
+        if not starts:
+            return _on_to_tier3(f"{verdict}; no start to check", cand)
+        state = f"Received at: {message.ts.isoformat()}\n{message.text}"
+        try:
+            labels = [label for label, _ in starts]
+            reply = check.confirm_start(state, labels, lock_timeout=check.timeout)
+        except (Tier0Busy, Tier0Unavailable) as exc:
+            return f"{verdict}; {self._check_failed('start check', exc)}"
+        named = [s for s in starts if reply.label in (decision.YES, s[0])]
+        if not named or reply.probability < self.llm.check.start_threshold:
+            note = f"tier 2.5: start {reply.label!r} at {reply.probability:.2f}, not confirmed"
+            return _on_to_tier3(note, cand)
+        [(label, start)] = named
+        outcome.candidate = confirmed_candidate(cand, gate, start)
+        outcome.pending_reason = f"tier 2.5: start {label} confirmed at {reply.probability:.2f}"
+        logger.info("%s; %r goes to pending without tier 3", outcome.pending_reason, cand.title)
+        return None
+
+    def _check_failed(self, step: str, exc: Exception) -> str:
+        """The note for a busy or failed decision host; a failure skips Tier 2.5 for the run."""
+        if isinstance(exc, Tier0Busy):
+            logger.info("%s busy: %s", step, exc)
+            return f"{step} busy: {exc}"
+        self._check_unavailable = True
+        logger.warning("%s unavailable; tier 2.5 skipped for the rest of this run: %s", step, exc)
+        return f"{step} unavailable: {exc}"
 
     def _paid(
         self, message: Message, cand: MeetingCandidate, timezone: str, notes: list[str]

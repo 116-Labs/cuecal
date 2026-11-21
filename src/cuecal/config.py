@@ -60,7 +60,7 @@ auto_create = 0.85
 # [llm.check]                     # Tier 2.5 (#82): asks the [tier0] host before Tier 3
 # enabled = false                 # true needs [tier0]; a decisive non-invite skips Tier 3
 # invite_threshold = 0.9          # thresholds are provisional until the Tier 2.5 eval
-# start_threshold = 0.9
+# start_threshold = 0.9           # a start confirmed at this goes to pending, not Tier 3
 
 # Tier 0 decision model (#21), optional: off until [tier0] is set, so extraction uses the regex
 # gate by default. If the local host is unavailable, cuecal falls back to the regex gate (after

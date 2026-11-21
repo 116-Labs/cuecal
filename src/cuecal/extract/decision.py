@@ -11,8 +11,10 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from cuecal import db
 from cuecal.config import (
@@ -49,6 +51,10 @@ CRITERIA: dict[str, str] = {
     ),
     "not_invite": "It has nothing to do with meetings.",
 }
+START_QUESTION_ID = "start"
+YES = "yes"
+NO = "no"
+NONE_OF_THESE = "none of these"
 
 
 class Tier0Unavailable(RuntimeError):
@@ -76,6 +82,13 @@ class Tier0Decision:
     confidence: float | None = None
 
 
+@dataclass(frozen=True)
+class StartAnswer:
+    label: str
+    probability: float
+    probabilities: dict[str, float]
+
+
 def route_for(label: str, probability: float, *, high: float, low: float) -> Route:
     """Map the top answer to a route. Any answer the model is unsure of is a near miss."""
     if probability < low:
@@ -96,25 +109,59 @@ def build_request(text: str) -> dict[str, Any]:
     }
 
 
-def _find_answer(body: dict[str, Any]) -> dict[str, Any]:
+def format_start(when: datetime, zone: str) -> str:
+    """ISO 8601 date-time in ``zone`` with the IANA name appended, as in RFC 9557."""
+    return f"{when.astimezone(ZoneInfo(zone)).isoformat()}[{zone}]"
+
+
+def build_start_request(state: str, starts: list[str]) -> dict[str, Any]:
+    """One start is a yes/no question; two or more are a choice with ``none of these`` (#170)."""
+    if len(starts) == 1:
+        [start] = starts
+        instructions = f"Does the meeting this message invites the reader to start at {start}?"
+        criteria = {
+            YES: f"The meeting starts at {start}.",
+            NO: f"The meeting does not start at {start}.",
+        }
+    else:
+        instructions = "When does the meeting this message invites the reader to start?"
+        criteria = {start: f"The meeting starts at {start}." for start in starts}
+        criteria[NONE_OF_THESE] = "The meeting starts at none of these times."
+    return {
+        "state": state,
+        "questions": {
+            START_QUESTION_ID: {
+                "type": "choice",
+                "instructions": instructions,
+                "criteria": criteria,
+            }
+        },
+    }
+
+
+def _find_answer(body: dict[str, Any], question_id: str) -> dict[str, Any]:
     # Clef answers are keyed by question id. The envelope around them is not documented for the
     # llama-server port, so accept the answer at the top level or under "answers"/"result".
     result = body.get("result")
     nested = result.get("answers") if isinstance(result, dict) else None
     for container in (body, body.get("answers"), result, nested):
-        if isinstance(container, dict) and isinstance(container.get(QUESTION_ID), dict):
-            return container[QUESTION_ID]
-    raise ProviderError(f"decision response has no answer for {QUESTION_ID!r}")
+        if isinstance(container, dict) and isinstance(container.get(question_id), dict):
+            return container[question_id]
+    raise ProviderError(f"decision response has no answer for {question_id!r}")
 
 
-def parse_answer(body: dict[str, Any]) -> tuple[dict[str, float], float | None]:
-    """Return (per-class probabilities, confidence) from a systemone response body."""
-    answer = _find_answer(body)
+def parse_choice(
+    body: dict[str, Any], question_id: str, options: tuple[str, ...]
+) -> tuple[dict[str, float], float | None]:
+    """Return (per-option probabilities, confidence) for one choice question's answer."""
+    answer = _find_answer(body, question_id)
     probs = answer.get("probabilities")
-    if not isinstance(probs, dict) or set(probs) != set(CLASSES):
-        raise ProviderError("decision answer must give a probability for each of the five classes")
+    if not isinstance(probs, dict) or set(probs) != set(options):
+        raise ProviderError(
+            f"decision answer for {question_id!r} must give a probability for each option"
+        )
     out: dict[str, float] = {}
-    for name in CLASSES:
+    for name in options:
         p = probs[name]
         if isinstance(p, bool) or not isinstance(p, int | float) or not 0 <= p <= 1:
             raise ProviderError(f"probability for {name!r} must be a number between 0 and 1")
@@ -123,6 +170,11 @@ def parse_answer(body: dict[str, Any]) -> tuple[dict[str, float], float | None]:
     usable = isinstance(conf, int | float) and not isinstance(conf, bool)
     confidence = float(conf) if usable else None
     return out, confidence
+
+
+def parse_answer(body: dict[str, Any]) -> tuple[dict[str, float], float | None]:
+    """Return (per-class probabilities, confidence) from a systemone response body."""
+    return parse_choice(body, QUESTION_ID, CLASSES)
 
 
 _host_locks: dict[str, threading.Lock] = {}
@@ -175,30 +227,47 @@ class Tier0Client:
         finally:
             lock.release()
 
+    def _choose(
+        self,
+        payload: dict[str, Any],
+        question_id: str,
+        options: tuple[str, ...],
+        lock_timeout: float | None,
+    ) -> tuple[dict[str, float], float | None]:
+        last: Exception | None = None
+        for attempt in range(1 + self.retries):
+            try:
+                return parse_choice(self._ask(payload, lock_timeout), question_id, options)
+            except ProviderError as exc:
+                last = exc
+                logger.info("tier 0 attempt %d failed: %s", attempt + 1, exc)
+        raise Tier0Unavailable(
+            f"tier 0 host {self.host} gave no usable answer after {1 + self.retries} tries: {last}"
+        )
+
     def classify(self, text: str, *, lock_timeout: float | None = None) -> Tier0Decision:
         """Ask the five-class question; raise Tier0Unavailable once ``retries`` extra tries fail.
 
         With ``lock_timeout`` set, a host lock held that long raises Tier0Busy, never retried."""
-        payload = build_request(text)
-        last: Exception | None = None
-        for attempt in range(1 + self.retries):
-            try:
-                probs, confidence = parse_answer(self._ask(payload, lock_timeout))
-            except ProviderError as exc:
-                last = exc
-                logger.info("tier 0 attempt %d failed: %s", attempt + 1, exc)
-                continue
-            label = max(CLASSES, key=lambda name: probs[name])
-            return Tier0Decision(
-                label=label,
-                probability=probs[label],
-                probabilities=probs,
-                route=route_for(label, probs[label], high=self.high, low=self.low),
-                confidence=confidence,
-            )
-        raise Tier0Unavailable(
-            f"tier 0 host {self.host} gave no usable answer after {1 + self.retries} tries: {last}"
+        probs, confidence = self._choose(build_request(text), QUESTION_ID, CLASSES, lock_timeout)
+        label = max(CLASSES, key=lambda name: probs[name])
+        return Tier0Decision(
+            label=label,
+            probability=probs[label],
+            probabilities=probs,
+            route=route_for(label, probs[label], high=self.high, low=self.low),
+            confidence=confidence,
         )
+
+    def confirm_start(
+        self, state: str, starts: list[str], *, lock_timeout: float | None = None
+    ) -> StartAnswer:
+        """Ask the start question over ``starts``; raises as ``classify`` does."""
+        question = build_start_request(state, starts)
+        options = tuple(question["questions"][START_QUESTION_ID]["criteria"])
+        probs, _ = self._choose(question, START_QUESTION_ID, options, lock_timeout)
+        label = max(options, key=lambda name: probs[name])
+        return StartAnswer(label=label, probability=probs[label], probabilities=probs)
 
 
 def record_near_miss(

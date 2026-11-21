@@ -118,6 +118,35 @@ def test_gate_accepts_confidence_at_min_confidence():
     assert _gate(_answer(confidence=0.7)).passed
 
 
+@pytest.mark.parametrize(
+    ("raw", "rule"),
+    [
+        (_answer(end="2026-10-20T14:00:00"), tier2.END_RULE),
+        (_answer(confidence=0.5), tier2.CONFIDENCE_RULE),
+    ],
+    ids=["end", "confidence"],
+)
+def test_gate_keeps_the_parsed_draft_only_for_end_and_confidence_failures(raw, rule):
+    result = _gate(raw)
+    assert not result.passed
+    assert result.rule == rule
+    ny = ZoneInfo("America/New_York")
+    assert result.draft.start == datetime(2026, 10, 20, 15, tzinfo=ny)
+    assert result.draft.tz == "America/New_York"
+    assert result.draft.attendees == ["ana@example.com"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["not json", _answer(start="next tuesday"), _answer(start="2026-10-01T15:00:00")],
+    ids=["non-json", "schema", "window"],
+)
+def test_gate_keeps_no_draft_for_other_failures(raw):
+    result = _gate(raw)
+    assert not result.passed
+    assert (result.draft, result.rule) == (None, None)
+
+
 def _partial():
     return MeetingCandidate(
         title="Meeting",

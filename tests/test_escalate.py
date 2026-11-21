@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sqlite3
+import threading
 import urllib.error
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from cuecal import db
 from cuecal.config import CheckConfig, LLMConfig, PaidLLMConfig, parse_config
-from cuecal.extract import decision, escalate, tier1, tier3
+from cuecal.extract import decision, escalate, tier1, tier2, tier3
 from cuecal.extract.decision import Tier0Client
 from cuecal.extract.escalate import Escalator, needs_escalation
 from cuecal.extract.providers import (
@@ -266,7 +273,9 @@ def test_unreachable_tier2_with_tier3_off_names_the_skip_in_pending(conn, monkey
     local = _ollama_failing(monkeypatch, TimeoutError("timed out"))
     esc = Escalator(_llm(paid=False), conn=conn, local=local, now=_now)
     esc.process(_msg("m1"), _partial())
-    assert esc.process(_msg("m2"), _partial()).pending_reason == escalate.LOCAL_UNREACHABLE
+    assert esc.process(_msg("m2"), _partial()).pending_reason == (
+        f"{escalate.LOCAL_UNREACHABLE}; {escalate.TIER3_UNCONFIGURED}"
+    )
 
 
 @pytest.mark.parametrize("answer", ["{}", LOW], ids=["fails-validation", "below-min-confidence"])
@@ -759,11 +768,9 @@ def test_tier_2_5_decisive_reschedule_or_cancel_skips_tier_3_and_is_logged_only(
         ("mentions_meeting", 0.6, 0.9),
         ("cancel", 0.7, 0.75),
         ("new_invite", 0.5, 0.9),
-        ("new_invite", 0.9, 0.9),
-        ("new_invite", 0.99, 0.9),
     ],
 )
-def test_tier_2_5_inconclusive_or_new_invite_goes_on_to_tier_3(
+def test_tier_2_5_inconclusive_invite_answer_goes_on_to_tier_3(
     conn, monkeypatch, label, probability, threshold
 ):
     log = []
@@ -874,3 +881,363 @@ def test_tier_2_5_unavailable_in_a_previous_run_does_not_stop_the_next_run_askin
     outcome = _checked(conn, log).process(_msg("m2"), _partial())
     assert log == ["ollama", "clef"]
     assert outcome.drop_reason == "tier 2.5: not_invite at 0.95"
+
+
+NY = ZoneInfo("America/New_York")
+GEMMA_START = datetime(2026, 10, 20, 15, 0, tzinfo=NY)
+GEMMA_LABEL = "2026-10-20T15:00:00-04:00[America/New_York]"
+OTHER_START = datetime(2026, 10, 20, 15, 30, tzinfo=NY)
+OTHER_LABEL = "2026-10-20T15:30:00-04:00[America/New_York]"
+NEW_INVITE = ("new_invite", 0.95)
+
+
+def _gemma(**changes):
+    values = {
+        "title": "Design review",
+        "start": "2026-10-20T15:00:00",
+        "end": "2026-10-20T16:00:00",
+        "timezone": "America/New_York",
+        "attendees": ["ana@example.com"],
+        "confidence": 0.9,
+    }
+    values.update(changes)
+    return json.dumps(values)
+
+
+END_WRONG = _gemma(end="2026-10-20T14:00:00")
+CONF_LOW = _gemma(confidence=0.5)
+
+
+class DecisionHost:
+    """Loopback /v1/systemone host giving fixed odds to the invite and the start question."""
+
+    def __init__(self, invite: tuple[str, float], start: tuple[str, float] | None) -> None:
+        self.answers = {decision.QUESTION_ID: invite, decision.START_QUESTION_ID: start}
+        self.requests: list[dict[str, Any]] = []
+        host = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - http.server API
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                host.requests.append({"path": self.path, "body": body})
+                status, reply = host.reply(body)
+                raw = json.dumps(reply).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def reply(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        [(qid, question)] = body["questions"].items()
+        answer = self.answers.get(qid)
+        if answer is None:
+            return 500, {}
+        label, probability = answer
+        probs = dict.fromkeys(question["criteria"], 0.0) | {label: probability}
+        return 200, {qid: {"probabilities": probs}}
+
+    @property
+    def questions(self) -> list[str]:
+        return [next(iter(r["body"]["questions"])) for r in self.requests]
+
+    def start_question(self) -> dict[str, Any]:
+        bodies = [r["body"] for r in self.requests]
+        [body] = [b for b in bodies if decision.START_QUESTION_ID in b["questions"]]
+        return body
+
+
+@contextmanager
+def _decision_host(
+    invite: tuple[str, float] = NEW_INVITE, start: tuple[str, float] | None = None
+) -> Iterator[DecisionHost]:
+    host = DecisionHost(invite, start)
+    serve = threading.Thread(
+        target=host.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    )
+    serve.start()
+    try:
+        yield host
+    finally:
+        host.server.shutdown()
+        host.server.server_close()
+
+
+def _start_checked(conn, host, local_answer, *, paid=True, llm=None):
+    log = []
+    llm = llm or LLMConfig(
+        timezone="UTC", paid=_paid_cfg() if paid else None, check=CheckConfig(enabled=True)
+    )
+    esc = Escalator(
+        llm,
+        conn=conn,
+        local=LoggedProvider("ollama", local_answer, log),
+        paid=LoggedProvider("anthropic", GOOD, log) if paid else None,
+        now=_now,
+        check=Tier0Client(host=host.url, high=0.8, low=0.3, timeout=2.0, retries=0),
+    )
+    return esc, log
+
+
+def _linked(**kw):
+    return _partial(passcode="424242", **kw)
+
+
+@pytest.mark.parametrize(
+    "local_answer",
+    [
+        ProviderError("HTTP 500"),
+        "not json",
+        "{}",
+        _gemma(start="2026-10-01T15:00:00"),
+    ],
+    ids=["provider", "non-json", "schema", "window"],
+)
+def test_start_check_is_not_asked_after_an_ineligible_tier_2_failure(conn, local_answer):
+    with _decision_host(start=("yes", 0.99)) as host:
+        esc, log = _start_checked(conn, host, local_answer)
+        outcome = esc.process(_msg(), _partial())
+    assert host.questions == [decision.QUESTION_ID]
+    assert log == ["ollama", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+
+
+def test_start_check_is_not_asked_when_no_start_was_found(conn, monkeypatch):
+    real = Escalator._attempt
+
+    def without_start(self, provider, message, cand, tier, timezone, **kw):
+        attempt = real(self, provider, message, cand, tier, timezone, **kw)
+        if tier == escalate.LOCAL_TIER:
+            draft = dataclasses.replace(attempt.gate.draft, start=None)
+            attempt.gate = dataclasses.replace(attempt.gate, draft=draft)
+        return attempt
+
+    monkeypatch.setattr(Escalator, "_attempt", without_start)
+    with _decision_host(start=("yes", 0.99)) as host:
+        esc, log = _start_checked(conn, host, END_WRONG)
+        outcome = esc.process(_msg(), _partial())
+    assert host.questions == [decision.QUESTION_ID]
+    assert log == ["ollama", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+
+
+@pytest.mark.parametrize(
+    "partial_start",
+    [None, datetime(2026, 10, 20, 19, 0, tzinfo=UTC), datetime(2026, 10, 20, 15, 0)],
+    ids=["gemma-only", "same-instant-in-utc", "same-wall-time-naive"],
+)
+def test_one_distinct_start_is_a_yes_no_question_in_iso_with_its_iana_zone(
+    conn, partial_start
+):
+    partial = _partial(start=partial_start, tz="America/New_York" if partial_start else None)
+    with _decision_host(start=("no", 0.99)) as host:
+        esc, _ = _start_checked(conn, host, END_WRONG)
+        msg = _msg()
+        esc.process(msg, partial)
+    body = host.start_question()
+    assert host.requests[-1]["path"] == "/v1/systemone"
+    assert body["state"] == f"Received at: {RECEIVED.isoformat()}\n{msg.text}"
+    question = body["questions"][decision.START_QUESTION_ID]
+    assert question["type"] == "choice"
+    assert list(question["criteria"]) == ["yes", "no"]
+    assert GEMMA_LABEL in question["instructions"]
+
+
+def test_new_invite_at_the_invite_threshold_is_decisive_and_asks_the_start_question(conn):
+    with _decision_host(invite=("new_invite", 0.9), start=("no", 0.99)) as host:
+        esc, log = _start_checked(conn, host, CONF_LOW)
+        esc.process(_msg(), _partial())
+    assert host.questions == [decision.QUESTION_ID, decision.START_QUESTION_ID]
+    assert log == ["ollama", "anthropic"]
+
+
+def test_two_distinct_starts_are_a_choice_with_none_of_these(conn):
+    partial = _partial(start=OTHER_START, tz="America/New_York")
+    with _decision_host(start=("none of these", 0.99)) as host:
+        esc, _ = _start_checked(conn, host, END_WRONG)
+        esc.process(_msg(), partial)
+    question = host.start_question()["questions"][decision.START_QUESTION_ID]
+    assert question["type"] == "choice"
+    assert list(question["criteria"]) == [GEMMA_LABEL, OTHER_LABEL, "none of these"]
+
+
+@pytest.mark.parametrize(
+    ("partial_start", "reply", "label"),
+    [
+        (None, ("yes", 0.95), GEMMA_LABEL),
+        (None, ("yes", 0.9), GEMMA_LABEL),
+        (OTHER_START, (OTHER_LABEL, 0.97), OTHER_LABEL),
+        (OTHER_START, (GEMMA_LABEL, 0.9), GEMMA_LABEL),
+    ],
+    ids=["yes", "yes-at-threshold", "named-partial", "named-gemma-at-threshold"],
+)
+def test_confirmed_start_skips_tier_3_and_goes_to_pending_even_above_auto_create(
+    conn, partial_start, reply, label
+):
+    partial = _partial(start=partial_start, tz="America/New_York" if partial_start else None)
+    with _decision_host(start=reply) as host:
+        esc, log = _start_checked(conn, host, END_WRONG)
+        outcome = esc.process(_msg(), partial)
+    assert host.questions == [decision.QUESTION_ID, decision.START_QUESTION_ID]
+    assert log == ["ollama"]
+    assert outcome.drop_reason is None
+    assert outcome.pending_reason == f"tier 2.5: start {label} confirmed at {reply[1]:.2f}"
+    assert outcome.candidate.confidence >= parse_config({}).auto_create_threshold
+    [row] = db.list_extraction_telemetry(conn)
+    assert row["outcome"] == outcome.pending_reason
+
+
+@pytest.mark.parametrize(
+    ("partial_start", "reply", "start"),
+    [(None, ("yes", 0.95), GEMMA_START), (OTHER_START, (OTHER_LABEL, 0.95), OTHER_START)],
+    ids=["gemma-start", "partial-start"],
+)
+def test_confirmed_start_after_an_end_failure_ends_30_minutes_later(
+    conn, partial_start, reply, start
+):
+    partial = _partial(start=partial_start, tz="America/New_York" if partial_start else None)
+    with _decision_host(start=reply) as host:
+        esc, _ = _start_checked(conn, host, END_WRONG)
+        cand = esc.process(_msg(), partial).candidate
+    assert cand.start == start
+    assert cand.end == start + timedelta(minutes=30)
+    assert (cand.title, cand.tz, cand.attendees) == (
+        "Design review",
+        "America/New_York",
+        ["ana@example.com"],
+    )
+    assert cand.tier == escalate.LOCAL_TIER
+
+
+@pytest.mark.parametrize(
+    ("partial_start", "reply", "start"),
+    [(None, ("yes", 0.95), GEMMA_START), (OTHER_START, (OTHER_LABEL, 0.95), OTHER_START)],
+    ids=["gemma-start", "partial-start"],
+)
+def test_confirmed_start_after_a_confidence_failure_keeps_gemmas_end(
+    conn, partial_start, reply, start
+):
+    partial = _partial(start=partial_start, tz="America/New_York" if partial_start else None)
+    with _decision_host(start=reply) as host:
+        esc, _ = _start_checked(conn, host, CONF_LOW)
+        cand = esc.process(_msg(), partial).candidate
+    assert cand.start == start
+    assert cand.end == datetime(2026, 10, 20, 16, 0, tzinfo=NY)
+    assert (cand.title, cand.tz, cand.attendees) == (
+        "Design review",
+        "America/New_York",
+        ["ana@example.com"],
+    )
+
+
+def test_confirmed_start_after_gemmas_end_gets_a_30_minute_end(conn):
+    late = datetime(2026, 10, 20, 17, 0, tzinfo=NY)
+    partial = _partial(start=late, tz="America/New_York")
+    late_label = decision.format_start(late, "America/New_York")
+    with _decision_host(start=(late_label, 0.95)) as host:
+        esc, _ = _start_checked(conn, host, CONF_LOW)
+        cand = esc.process(_msg(), partial).candidate
+    assert (cand.start, cand.end) == (late, late + timedelta(minutes=30))
+
+
+@pytest.mark.parametrize(
+    ("invite", "start"),
+    [(("not_invite", 0.95), None), (NEW_INVITE, ("yes", 0.95)), (NEW_INVITE, ("no", 0.95))],
+    ids=["dropped", "pended", "tier-3"],
+)
+def test_tier_2_5_keeps_the_regex_join_url_meeting_id_and_passcode(conn, invite, start):
+    partial = _linked()
+    with _decision_host(invite=invite, start=start) as host:
+        esc, _ = _start_checked(conn, host, END_WRONG)
+        cand = esc.process(_msg(), partial).candidate
+    assert (cand.join_url, cand.meeting_id, cand.passcode) == (
+        "https://zoom.us/j/123456789",
+        "123456789",
+        "424242",
+    )
+
+
+@pytest.mark.parametrize(
+    ("partial_start", "reply"),
+    [
+        (None, ("no", 0.95)),
+        (None, ("yes", 0.89)),
+        (OTHER_START, ("none of these", 0.95)),
+        (OTHER_START, (OTHER_LABEL, 0.6)),
+    ],
+    ids=["no", "yes-below-threshold", "none-of-these", "named-below-threshold"],
+)
+def test_unconfirmed_start_goes_to_tier_3(conn, partial_start, reply):
+    partial = _partial(start=partial_start, tz="America/New_York" if partial_start else None)
+    with _decision_host(start=reply) as host:
+        esc, log = _start_checked(conn, host, END_WRONG)
+        outcome = esc.process(_msg(), partial)
+    assert host.questions == [decision.QUESTION_ID, decision.START_QUESTION_ID]
+    assert log == ["ollama", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+    assert outcome.pending_reason is None
+
+
+def test_start_threshold_comes_from_llm_check(conn):
+    llm = LLMConfig(
+        timezone="UTC", paid=_paid_cfg(), check=CheckConfig(enabled=True, start_threshold=0.5)
+    )
+    with _decision_host(start=("yes", 0.6)) as host:
+        esc, log = _start_checked(conn, host, END_WRONG, llm=llm)
+        outcome = esc.process(_msg(), _partial())
+    assert log == ["ollama"]
+    assert outcome.pending_reason == f"tier 2.5: start {GEMMA_LABEL} confirmed at 0.60"
+
+
+@pytest.mark.parametrize(
+    ("invite", "start", "note"),
+    [
+        (NEW_INVITE, ("no", 0.95), "tier 2.5: start 'no' at 0.95, not confirmed"),
+        (("new_invite", 0.5), None, "tier 2.5: new_invite at 0.50, inconclusive"),
+    ],
+    ids=["start-not-confirmed", "invite-inconclusive"],
+)
+@pytest.mark.parametrize("tier3", ["unconfigured", "key-missing", "capped"])
+def test_inconclusive_tier_2_5_without_tier_3_pends_with_both_reasons(
+    conn, invite, start, note, tier3
+):
+    reasons = {
+        "unconfigured": escalate.TIER3_UNCONFIGURED,
+        "key-missing": "tier 3 off: API key missing from the keyring",
+        "capped": "daily token cap reached",
+    }
+    if tier3 == "capped":
+        db.add_llm_usage(conn, "2026-10-18", input_tokens=10_000, output_tokens=0, usd=0.0)
+    with _decision_host(invite=invite, start=start) as host:
+        esc, log = _start_checked(conn, host, END_WRONG, paid=tier3 == "capped")
+        if tier3 == "key-missing":
+            esc.llm = LLMConfig(timezone="UTC", paid=_paid_cfg(), check=CheckConfig(enabled=True))
+        outcome = esc.process(_msg(), _partial())
+    assert log == ["ollama"]
+    assert outcome.drop_reason is None
+    assert note in outcome.pending_reason
+    assert reasons[tier3] in outcome.pending_reason
+
+
+def test_failed_start_check_goes_to_tier_3_and_skips_tier_2_5_for_the_run(conn):
+    with _decision_host(start=None) as host:
+        esc, log = _start_checked(conn, host, END_WRONG)
+        esc.paid = LoggedProvider("anthropic", PAID_DOWN, log)
+        first = esc.process(_msg("m1"), _partial())
+        second = esc.process(_msg("m2"), _partial())
+    assert host.questions == [decision.QUESTION_ID, decision.START_QUESTION_ID]
+    assert log == ["ollama", "anthropic", "ollama", "anthropic"]
+    assert "start check unavailable: tier 0 host" in first.pending_reason
+    assert escalate.CHECK_UNAVAILABLE_EARLIER in second.pending_reason
+
+
+def test_start_options_are_empty_without_any_start():
+    draft = tier2.LLMFields("T", None, None, "UTC", [], 0.9)
+    assert escalate.start_options(draft, _partial(), "UTC") == []
