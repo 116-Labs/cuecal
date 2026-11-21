@@ -493,6 +493,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                             continue
 
                         outcome = escalator.process(msg, cand, base_latency_ms=extract_ms)
+                        if outcome.drop_reason is not None:
+                            logger.info("dropped %r: %s", cand.title, outcome.drop_reason)
+                            if not args.dry_run:
+                                db.mark_seen(conn, msg.source, msg.id)
+                            continue
                         cand = outcome.candidate
 
                         is_linkless = False

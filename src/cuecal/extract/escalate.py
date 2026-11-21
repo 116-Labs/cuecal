@@ -15,7 +15,8 @@ from zoneinfo import ZoneInfo
 
 from cuecal import db, notify, secrets
 from cuecal.config import Config, LLMConfig, LocalLLMConfig, PaidLLMConfig
-from cuecal.extract import tier1, tier2, tier3
+from cuecal.extract import decision, tier1, tier2, tier3
+from cuecal.extract.decision import Tier0Client, Tier0Unavailable
 from cuecal.extract.providers import AnthropicProvider, OllamaProvider, OpenAIProvider, Provider
 from cuecal.models import MeetingCandidate, Message
 
@@ -25,6 +26,8 @@ LOCAL_TIER = "local"
 PAID_TIER = "paid"
 UNKNOWN_TIMEZONE = "recipient timezone unknown; set [llm].timezone"
 LOCAL_UNREACHABLE = "tier 2 skipped: local model unreachable earlier this run"
+NEAR_MISS_LABELS = ("not_invite", "mentions_meeting")
+LOG_ONLY_LABELS = ("reschedule", "cancel")
 
 
 def needs_escalation(cand: MeetingCandidate) -> bool:
@@ -37,6 +40,8 @@ class Outcome:
     candidate: MeetingCandidate
     pending_reason: str | None = None
     attempts: list[tier2.Attempt] = field(default_factory=list)
+    # Set when Tier 2.5 decided the message is no new invite: no event and no pending item.
+    drop_reason: str | None = None
 
 
 def paid_key_problem(cfg: Config) -> str | None:
@@ -87,12 +92,14 @@ class Escalator:
         paid: Provider | None = None,
         now: Callable[[], datetime] | None = None,
         record: bool = True,
+        check: Tier0Client | None = None,
     ) -> None:
         self.llm = llm
         self.conn = conn
         self.notifiers = list(notifiers)
         self.local = local
         self.paid = paid
+        self.check = check
         self.now = now or (lambda: datetime.now(UTC))
         self.record = record
         self._cap_notified_day: str | None = None
@@ -118,7 +125,18 @@ class Escalator:
                 logger.error("llm.paid: %s; tier 3 is off for this run", problem)
             else:
                 paid = build_paid_provider(cfg.llm.paid, cfg.secrets)
-        return cls(cfg.llm, conn=conn, notifiers=notifiers, local=local, paid=paid, record=record)
+        check = None
+        if cfg.llm.check.enabled and cfg.tier0 is not None:
+            check = Tier0Client.from_config(cfg.tier0)
+        return cls(
+            cfg.llm,
+            conn=conn,
+            notifiers=notifiers,
+            local=local,
+            paid=paid,
+            record=record,
+            check=check,
+        )
 
     def process(
         self,
@@ -165,6 +183,10 @@ class Escalator:
             if attempt.unreachable:
                 self._local_unreachable = True
                 logger.warning("tier 2 unreachable; skipped for the rest of this run")
+        if self.local is not None and self.check is not None:
+            outcome.drop_reason = self._invite_check(self.check, message, cand)
+            if outcome.drop_reason is not None:
+                return outcome
         if self.llm.paid is not None:
             paid_attempt = self._paid(message, cand, timezone, notes)
             if paid_attempt is not None:
@@ -177,6 +199,25 @@ class Escalator:
                 logger.info("tier 3 failed for %r: %s", cand.title, paid_attempt.gate.reason)
         outcome.pending_reason = "; ".join(notes)
         return outcome
+
+    def _invite_check(
+        self, check: Tier0Client, message: Message, cand: MeetingCandidate
+    ) -> str | None:
+        """Tier 2.5 (#82): the drop reason when Clef-flash decisively says "no new invite"."""
+        try:
+            answer = check.classify(message.text)
+        except Tier0Unavailable as exc:
+            logger.warning("tier 2.5 skipped for %r: %s", cand.title, exc)
+            return None
+        verdict = f"tier 2.5: {answer.label} at {answer.probability:.2f}"
+        decisive = answer.probability >= self.llm.check.invite_threshold
+        if not decisive or answer.label not in NEAR_MISS_LABELS + LOG_ONLY_LABELS:
+            logger.info("%s; %r goes on to tier 3", verdict, cand.title)
+            return None
+        if answer.label in NEAR_MISS_LABELS and self.record:
+            decision.record_near_miss(self.conn, message, answer, reason=verdict)
+        logger.info("%s; %r dropped before tier 3", verdict, cand.title)
+        return verdict
 
     def _paid(
         self, message: Message, cand: MeetingCandidate, timezone: str, notes: list[str]
@@ -268,7 +309,7 @@ class Escalator:
             "input_tokens": sum(a.input_tokens for a in outcome.attempts),
             "output_tokens": sum(a.output_tokens for a in outcome.attempts),
             "latency_ms": round(base_latency_ms + sum(a.latency_ms for a in outcome.attempts), 3),
-            "outcome": outcome.pending_reason or "ok",
+            "outcome": outcome.pending_reason or outcome.drop_reason or "ok",
         }
         logger.info("extraction telemetry", extra=record)
         if not self.record:

@@ -174,8 +174,14 @@ class Tier0Client:
         )
 
 
-def record_near_miss(conn: sqlite3.Connection, message: Message, decision: Tier0Decision) -> int:
-    """Record a below-threshold decision so it shows in `cuecal misses`."""
+def record_near_miss(
+    conn: sqlite3.Connection,
+    message: Message,
+    decision: Tier0Decision,
+    *,
+    reason: str | None = None,
+) -> int:
+    """Record a dropped decision so it shows in `cuecal misses`; ``reason`` names the dropper."""
     return db.record_near_miss(
         conn,
         source=message.source,
@@ -184,6 +190,7 @@ def record_near_miss(conn: sqlite3.Connection, message: Message, decision: Tier0
         text=message.text,
         confidence=decision.probability,
         score=decision.probabilities["new_invite"],
-        reason=f"tier 0: {decision.label} at {decision.probability:.2f}, below the low threshold",
+        reason=reason
+        or f"tier 0: {decision.label} at {decision.probability:.2f}, below the low threshold",
         details_json=json.dumps({"tier0": decision.probabilities}),
     )
