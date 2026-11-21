@@ -9,13 +9,15 @@ from datetime import UTC, datetime
 import pytest
 
 from cuecal import db
-from cuecal.config import LLMConfig, PaidLLMConfig, parse_config
-from cuecal.extract import escalate, tier1, tier3
+from cuecal.config import CheckConfig, LLMConfig, PaidLLMConfig, parse_config
+from cuecal.extract import decision, escalate, tier1, tier3
+from cuecal.extract.decision import Tier0Client
 from cuecal.extract.escalate import Escalator, needs_escalation
 from cuecal.extract.providers import (
     OllamaProvider,
     ProviderError,
     ProviderResult,
+    ProviderUnreachable,
     UnusableAnswer,
 )
 from cuecal.models import MeetingCandidate, Message
@@ -569,3 +571,230 @@ def test_paid_provider_error_keeps_partial(conn):
     outcome = esc.process(_msg(), _partial())
     assert outcome.candidate.tier == "regex"
     assert "tier 3 failed: provider error: HTTP 529" in outcome.pending_reason
+
+
+CLEF = "http://clef.test:8080"
+TIER0 = {"host": CLEF, "retries": 0}
+
+
+class LoggedProvider(FakeProvider):
+    def __init__(self, name, answer, log):
+        super().__init__(name, answer)
+        self.log = log
+
+    def complete(self, system, prompt, schema):
+        self.log.append(self.name)
+        return super().complete(system, prompt, schema)
+
+
+def _clef_answer(label, probability):
+    probs = dict.fromkeys(decision.CLASSES, 0.0) | {label: probability}
+    return {decision.QUESTION_ID: {"probabilities": probs}}
+
+
+def _serve_clef(monkeypatch, log, reply):
+    requests = []
+
+    def post(url, payload, *, headers, timeout):
+        log.append("clef")
+        requests.append((url, payload))
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(decision, "_post_json", post)
+    return requests
+
+
+def _check_llm(timezone="UTC", **check):
+    return LLMConfig(
+        timezone=timezone, paid=_paid_cfg(), check=CheckConfig(enabled=True, **check)
+    )
+
+
+def _checked(conn, log, local_answer=LOW, llm=None):
+    return Escalator(
+        llm or _check_llm(),
+        conn=conn,
+        local=LoggedProvider("ollama", local_answer, log),
+        paid=LoggedProvider("anthropic", GOOD, log),
+        now=_now,
+        check=Tier0Client(host=CLEF, high=0.8, low=0.3, retries=0),
+    )
+
+
+def _no_clef(monkeypatch):
+    def post(*a, **k):
+        raise AssertionError("tier 2.5 must not call the decision model")
+
+    monkeypatch.setattr(decision, "_post_json", post)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"tier0": TIER0},
+        {"tier0": TIER0, "llm": {"check": {"enabled": False}}},
+    ],
+)
+def test_tier_2_5_off_builds_no_check_and_tier_3_runs_as_before(conn, monkeypatch, data):
+    _no_clef(monkeypatch)
+    esc = Escalator.from_config(parse_config(data), conn=conn)
+    assert esc.check is None
+    log = []
+    esc = Escalator(
+        _llm(),
+        conn=conn,
+        local=LoggedProvider("ollama", LOW, log),
+        paid=LoggedProvider("anthropic", GOOD, log),
+        now=_now,
+    )
+    outcome = esc.process(_msg(), _partial())
+    assert log == ["ollama", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+    assert outcome.drop_reason is None
+
+
+def test_tier_2_5_on_builds_a_check_on_the_tier0_host(conn):
+    cfg = parse_config({"tier0": TIER0, "llm": {"check": {"enabled": True}}})
+    esc = Escalator.from_config(cfg, conn=conn)
+    assert esc.check is not None
+    assert esc.check.host == CLEF
+
+
+@pytest.mark.parametrize(
+    ("local_answer", "timezone"),
+    [
+        (ProviderUnreachable("connection refused"), "UTC"),
+        (ProviderError("HTTP 500"), "UTC"),
+        ("not json", "UTC"),
+        ("{}", "UTC"),
+        (GOOD.replace("America/New_York", "Nowhere/Zone"), "Nowhere/Zone"),
+        (GOOD.replace("2026-10-20T15", "2026-10-01T15"), "UTC"),
+        (GOOD.replace("15:30:00", "14:30:00"), "UTC"),
+        (LOW, "UTC"),
+    ],
+    ids=["unreachable", "provider", "non-json", "schema", "timezone", "window", "end", "conf"],
+)
+def test_tier_2_5_asks_clef_the_invite_question_after_any_tier_2_failure(
+    conn, monkeypatch, local_answer, timezone
+):
+    log = []
+    requests = _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.95))
+    llm = _check_llm(timezone=timezone)
+    msg = _msg()
+    outcome = _checked(conn, log, local_answer, llm).process(msg, _partial())
+    assert outcome.attempts[0].passed is False
+    assert log == ["ollama", "clef"]
+    [(url, payload)] = requests
+    assert url == f"{CLEF}/v1/systemone"
+    assert payload == decision.build_request(msg.text)
+    assert list(payload["questions"]["invite"]["criteria"]) == [
+        "new_invite",
+        "reschedule",
+        "cancel",
+        "mentions_meeting",
+        "not_invite",
+    ]
+    assert outcome.drop_reason == "tier 2.5: not_invite at 0.95"
+
+
+def test_tier_2_5_still_asks_when_tier_2_was_skipped_as_unreachable(conn, monkeypatch):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer("new_invite", 0.95))
+    esc = _checked(conn, log, ProviderUnreachable("connection refused"))
+    esc.process(_msg("m1"), _partial())
+    log.clear()
+    outcome = esc.process(_msg("m2"), _partial())
+    assert log == ["clef", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+
+
+@pytest.mark.parametrize("label", ["not_invite", "mentions_meeting"])
+def test_tier_2_5_decisive_non_invite_skips_tier_3_and_records_one_miss(
+    conn, monkeypatch, label
+):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer(label, 0.9))
+    cand = _partial()
+    outcome = _checked(conn, log).process(_msg(), cand)
+    assert log == ["ollama", "clef"]
+    assert outcome.candidate is cand
+    assert outcome.pending_reason is None
+    assert outcome.drop_reason == f"tier 2.5: {label} at 0.90"
+    [miss] = db.list_near_misses(conn)
+    assert (miss["source"], miss["message_id"]) == ("slack", "m1")
+    assert miss["reason"] == f"tier 2.5: {label} at 0.90"
+    assert miss["confidence"] == pytest.approx(0.9)
+
+
+def test_tier_2_5_dry_run_records_no_miss(conn, monkeypatch):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.99))
+    esc = _checked(conn, log)
+    esc.record = False
+    assert esc.process(_msg(), _partial()).drop_reason is not None
+    assert db.list_near_misses(conn) == []
+
+
+@pytest.mark.parametrize("label", ["reschedule", "cancel"])
+def test_tier_2_5_decisive_reschedule_or_cancel_skips_tier_3_and_is_logged_only(
+    conn, monkeypatch, caplog, label
+):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer(label, 0.97))
+    with caplog.at_level(logging.INFO, logger="cuecal.extract"):
+        outcome = _checked(conn, log).process(_msg(), _partial())
+    assert log == ["ollama", "clef"]
+    assert outcome.pending_reason is None
+    assert outcome.drop_reason == f"tier 2.5: {label} at 0.97"
+    assert db.list_near_misses(conn) == []
+    assert any(f"tier 2.5: {label} at 0.97" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("label", "probability", "threshold"),
+    [
+        ("not_invite", 0.89, 0.9),
+        ("mentions_meeting", 0.6, 0.9),
+        ("cancel", 0.7, 0.75),
+        ("new_invite", 0.5, 0.9),
+        ("new_invite", 0.9, 0.9),
+        ("new_invite", 0.99, 0.9),
+    ],
+)
+def test_tier_2_5_inconclusive_or_new_invite_goes_on_to_tier_3(
+    conn, monkeypatch, label, probability, threshold
+):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer(label, probability))
+    esc = _checked(conn, log, llm=_check_llm(invite_threshold=threshold))
+    outcome = esc.process(_msg(), _partial())
+    assert log == ["ollama", "clef", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+    assert outcome.drop_reason is None
+    assert db.list_near_misses(conn) == []
+
+
+def test_tier_2_5_unanswered_check_goes_on_to_tier_3(conn, monkeypatch):
+    log = []
+    _serve_clef(monkeypatch, log, ProviderError("HTTP 503"))
+    outcome = _checked(conn, log).process(_msg(), _partial())
+    assert log == ["ollama", "clef", "anthropic"]
+    assert outcome.candidate.tier == "paid"
+
+
+def test_tier_2_5_never_runs_when_tier_2_passes(conn, monkeypatch):
+    _no_clef(monkeypatch)
+    log = []
+    outcome = _checked(conn, log, GOOD).process(_msg(), _partial())
+    assert log == ["ollama"]
+    assert outcome.candidate.tier == "local"
+
+
+def test_tier_2_5_drop_reason_is_the_telemetry_outcome(conn, monkeypatch):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.95))
+    _checked(conn, log).process(_msg(), _partial())
+    [row] = db.list_extraction_telemetry(conn)
+    assert row["outcome"] == "tier 2.5: not_invite at 0.95"

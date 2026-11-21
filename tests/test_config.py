@@ -426,3 +426,78 @@ def test_mirror_target_defaults_to_primary_when_unset():
 def test_validation_errors(data, message):
     with pytest.raises(ConfigError, match=message):
         parse_config(data)
+
+
+TIER0 = {"host": "http://localhost:8080"}
+
+
+@pytest.mark.parametrize("data", [{}, {"llm": {}}, {"llm": {"check": {"enabled": False}}}])
+def test_llm_check_is_off_without_a_table_or_when_disabled(data):
+    assert parse_config(data).llm.check.enabled is False
+
+
+def test_llm_check_enabled_with_tier0_defaults_both_thresholds_to_point_nine():
+    check = parse_config({"llm": {"check": {"enabled": True}}, "tier0": TIER0}).llm.check
+    assert check.enabled is True
+    assert check.invite_threshold == 0.9
+    assert check.start_threshold == 0.9
+
+
+def test_llm_check_thresholds_are_read_from_config():
+    data = {
+        "llm": {"check": {"enabled": True, "invite_threshold": 0.75, "start_threshold": 1}},
+        "tier0": TIER0,
+    }
+    check = parse_config(data).llm.check
+    assert (check.invite_threshold, check.start_threshold) == (0.75, 1.0)
+
+
+def test_llm_check_enabled_without_tier0_names_the_tier0_host():
+    with pytest.raises(ConfigError, match=r"\[tier0\]\.host"):
+        parse_config({"llm": {"check": {"enabled": True}}})
+
+
+@pytest.mark.parametrize(
+    ("check", "message"),
+    [
+        ({"enabled": True, "bogus": 1}, r"unknown keys in \[llm.check\]: bogus"),
+        ({"enabled": "yes"}, "llm.check.enabled"),
+        ({"enabled": 1}, "llm.check.enabled"),
+        ({"enabled": True, "invite_threshold": 1.5}, "llm.check.invite_threshold"),
+        ({"enabled": True, "invite_threshold": -0.1}, "llm.check.invite_threshold"),
+        ({"enabled": True, "invite_threshold": "0.9"}, "llm.check.invite_threshold"),
+        ({"enabled": True, "invite_threshold": True}, "llm.check.invite_threshold"),
+        ({"enabled": True, "start_threshold": 2}, "llm.check.start_threshold"),
+        ({"enabled": True, "start_threshold": "high"}, "llm.check.start_threshold"),
+    ],
+)
+def test_llm_check_validation_names_the_bad_key(check, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config({"llm": {"check": check}, "tier0": TIER0})
+
+
+def _header_line(header: str) -> int:
+    lines = DEFAULT_CONFIG_TOML.splitlines()
+    return next(i for i, line in enumerate(lines) if line.split("  ")[0] == f"# {header}")
+
+
+def _commented_block(header: str) -> str:
+    lines = DEFAULT_CONFIG_TOML.splitlines()
+    start = _header_line(header)
+    block = [lines[start][2:]]
+    for line in lines[start + 1 :]:
+        if not line.startswith("# ") or line.startswith("# ["):
+            break
+        block.append(line[2:])
+    return "\n".join(block)
+
+
+def test_default_config_documents_llm_check_off_next_to_the_other_llm_tiers():
+    local, paid, check = (_header_line(h) for h in ("[llm.local]", "[llm.paid]", "[llm.check]"))
+    assert local < paid < check < _header_line("[tier0]")
+    block = _commented_block("[llm.check]")
+    for key in ("enabled = false", "invite_threshold", "start_threshold"):
+        assert key in block
+    check = parse_config(tomllib.loads(block)).llm.check
+    assert check.enabled is False
+    assert (check.invite_threshold, check.start_threshold) == (0.9, 0.9)
