@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -799,12 +800,38 @@ def test_tier_2_5_never_runs_when_tier_2_passes(conn, monkeypatch):
     assert outcome.candidate.tier == "local"
 
 
-def test_tier_2_5_drop_reason_is_the_telemetry_outcome(conn, monkeypatch):
+def test_tier_2_5_drop_is_the_dropped_telemetry_outcome(conn, monkeypatch):
     log = []
     _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.95))
-    _checked(conn, log).process(_msg(), _partial())
+    outcome = _checked(conn, log).process(_msg(), _partial())
     [row] = db.list_extraction_telemetry(conn)
-    assert row["outcome"] == "tier 2.5: not_invite at 0.95"
+    assert row["outcome"] == escalate.DROPPED
+    assert outcome.check.label == "not_invite"
+
+
+class SlowCheck(Tier0Client):
+    def classify(self, text, *, lock_timeout=None):
+        time.sleep(0.05)
+        probs = dict.fromkeys(decision.CLASSES, 0.0) | {"not_invite": 0.95}
+        return decision.Tier0Decision("not_invite", 0.95, probs, decision.Route.DROP)
+
+
+def test_tier_2_5_time_is_added_to_the_telemetry_latency(conn):
+    log = []
+    check = SlowCheck(host=CLEF, high=0.8, low=0.3, retries=0)
+    outcome = _checked(conn, log, check=check).process(_msg(), _partial(), base_latency_ms=7.0)
+    assert outcome.check.latency_ms >= 40
+    [row] = db.list_extraction_telemetry(conn)
+    gemma_ms = sum(a.latency_ms for a in outcome.attempts)
+    assert row["latency_ms"] == pytest.approx(7.0 + gemma_ms + outcome.check.latency_ms, abs=1e-3)
+
+
+def test_telemetry_without_tier_2_5_keeps_the_pending_reason_as_outcome(conn):
+    esc = Escalator(_llm(paid=False), conn=conn, local=FakeProvider("ollama", LOW), now=_now)
+    outcome = esc.process(_msg(), _partial())
+    assert outcome.check is None
+    [row] = db.list_extraction_telemetry(conn)
+    assert row["outcome"] == outcome.pending_reason
 
 
 PAID_DOWN = ProviderError("HTTP 529")
@@ -1091,7 +1118,7 @@ def test_confirmed_start_skips_tier_3_and_goes_to_pending_even_above_auto_create
     assert outcome.pending_reason == f"tier 2.5: start {label} confirmed at {reply[1]:.2f}"
     assert outcome.candidate.confidence >= parse_config({}).auto_create_threshold
     [row] = db.list_extraction_telemetry(conn)
-    assert row["outcome"] == outcome.pending_reason
+    assert row["outcome"] == escalate.CONFIRMED
 
 
 @pytest.mark.parametrize(
@@ -1236,6 +1263,60 @@ def test_failed_start_check_goes_to_tier_3_and_skips_tier_2_5_for_the_run(conn):
     assert log == ["ollama", "anthropic", "ollama", "anthropic"]
     assert "start check unavailable: tier 0 host" in first.pending_reason
     assert escalate.CHECK_UNAVAILABLE_EARLIER in second.pending_reason
+
+
+@pytest.mark.parametrize(
+    ("invite", "start", "result", "reached_tier3"),
+    [
+        (NEW_INVITE, ("yes", 0.95), escalate.CONFIRMED, False),
+        (("mentions_meeting", 0.95), None, escalate.DROPPED, False),
+        (("reschedule", 0.95), None, escalate.LOG_ONLY, False),
+        (("new_invite", 0.5), None, escalate.INCONCLUSIVE, True),
+        (NEW_INVITE, ("no", 0.95), escalate.INCONCLUSIVE, True),
+        (None, None, escalate.UNAVAILABLE, True),
+        (NEW_INVITE, None, escalate.UNAVAILABLE, True),
+    ],
+    ids=[
+        "confirmed",
+        "dropped",
+        "log-only",
+        "invite-inconclusive",
+        "start-inconclusive",
+        "invite-unavailable",
+        "start-unavailable",
+    ],
+)
+def test_telemetry_outcome_names_the_tier_2_5_result(conn, invite, start, result, reached_tier3):
+    with _decision_host(invite=invite, start=start) as host:
+        esc, _ = _start_checked(conn, host, END_WRONG)
+        outcome = esc.process(_msg(), _partial())
+    assert outcome.check.result == result
+    assert outcome.reached_tier3 is reached_tier3
+    [row] = db.list_extraction_telemetry(conn)
+    assert row["outcome"] == result
+
+
+def test_telemetry_outcome_is_busy_when_the_decision_host_stays_locked(conn, monkeypatch):
+    log = []
+    _serve_clef(monkeypatch, log, _clef_answer("not_invite", 0.95))
+    check = Tier0Client(host=CLEF, high=0.8, low=0.3, retries=0, timeout=0.1)
+    esc = _checked(conn, log, check=check)
+    with decision._host_lock(CLEF):
+        outcome = esc.process(_msg(), _partial())
+    assert outcome.check.result == escalate.BUSY
+    assert outcome.check.latency_ms >= 80
+    [row] = db.list_extraction_telemetry(conn)
+    assert row["outcome"] == escalate.BUSY
+
+
+def test_tier_2_5_skipped_after_an_earlier_failure_is_unavailable(conn, monkeypatch):
+    log = []
+    _serve_clef(monkeypatch, log, ProviderUnreachable("connection refused"))
+    esc = _checked(conn, log, paid_answer=PAID_DOWN)
+    esc.process(_msg("m1"), _partial())
+    second = esc.process(_msg("m2"), _partial())
+    assert second.check.result == escalate.UNAVAILABLE
+    assert [r["outcome"] for r in db.list_extraction_telemetry(conn)] == [escalate.UNAVAILABLE] * 2
 
 
 def test_start_options_are_empty_without_any_start():
