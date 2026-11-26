@@ -35,7 +35,7 @@ uv run pytest
 | `src/cuecal/extract/` | Tier 0 (`__init__.py`: regex or `[tier0]` wrapper with degraded fallback, #81; `decision.py`: llama-server and opt-in Workers AI clients, #21/#81), Tier 1 (`.ics` and known templates), Tier 2 (`tier2.py`: prompt, validation gate, regex-wins merge), Tier 3 (`tier3.py`: daily spend cap), raw-HTTP LLM adapters (`providers.py`) and the escalation plus telemetry flow (`escalate.py`, with the opt-in Tier 2.5 invite and start check, #82/#170) |
 | `src/cuecal/sinks/` | Sink protocol (`base.py`), Google Calendar sink, secondary-sink fan-out with retry |
 | `src/cuecal/` (rest) | Config, keyring secrets, Google OAuth sign-in and token refresh (`google_auth.py`), SQLite state (`db.py`), plugin registry, pending notifier, launchd/Task Scheduler service, run lock |
-| `src/cuecal/eval/` | Eval fixture schema and the `cuecal eval` runner (`runner.py`) |
+| `src/cuecal/eval/` | Eval fixture schema and the `cuecal eval` runner (`runner.py`; tier 2 chains into Tier 2.5 and counts Tier 3 without calling it, #172) |
 | `scripts/` | `release.sh` (publish a release) and the `block_commit.sh` hook |
 | `tests/` | pytest suite, one `test_<module>.py` per module; fixtures and a stub MCP server |
 

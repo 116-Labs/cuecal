@@ -13,6 +13,7 @@ import pytest
 from cuecal import cli
 from cuecal.config import parse_config
 from cuecal.eval import load_fixtures, runner
+from cuecal.extract import decision
 from cuecal.models import MeetingCandidate, Message
 
 FIXTURES = Path(__file__).parent / "fixtures" / "eval"
@@ -354,6 +355,142 @@ def test_tier2_eval_counts_a_failed_answer_as_escalated_to_tier3(tmp_path: Path,
     _ollama_answer(monkeypatch, dict(SLACK_ANSWER, confidence=0.1), [])
     report = runner.evaluate(load_fixtures(tmp_path), tier=2)
     assert report.escalated_t2() == (1, 1)
+
+
+CLEF = "http://clef.test:8080"
+# The slack fixture's expected start, as Gemma would give it.
+RIGHT_START = dict(SLACK_ANSWER, start="2026-10-04T18:10:00", timezone="America/Los_Angeles")
+
+
+def _chain(monkeypatch, gemma: dict, invite: tuple[str, float], start=None) -> list[str]:
+    """Serve Gemma on Ollama and the decision model on CLEF; return every URL asked."""
+    urls: list[str] = []
+
+    def fake_urlopen(req, timeout=None):
+        urls.append(req.full_url)
+        body = json.loads(req.data)
+        if req.full_url == f"{CLEF}/v1/systemone":
+            [(qid, question)] = body["questions"].items()
+            label, probability = invite if qid == decision.QUESTION_ID else start
+            probs = dict.fromkeys(question["criteria"], 0.0) | {label: probability}
+            return _FakeOllama(json.dumps({qid: {"probabilities": probs}}).encode())
+        reply = {"message": {"content": json.dumps(gemma)}, "prompt_eval_count": 50}
+        return _FakeOllama(json.dumps(dict(reply, eval_count=10)).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return urls
+
+
+def _check_config(**check):
+    data = {"tier0": {"host": CLEF, "retries": 0}, "llm": {"check": {"enabled": True, **check}}}
+    return parse_config(data)
+
+
+def _slack_eval(tmp_path: Path, monkeypatch, gemma, invite, start=None, **check):
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", tmp_path)
+    urls = _chain(monkeypatch, gemma, invite, start)
+    cfg = _check_config(**check)
+    report = runner.evaluate(
+        load_fixtures(tmp_path), tier=2, llm=cfg.llm, tier0=cfg.tier0, ram_sampler=lambda: None
+    )
+    return report, urls
+
+
+def test_tier2_eval_with_check_runs_gemma_then_tier_2_5_and_counts_tier_3_uncalled(
+    tmp_path: Path, monkeypatch
+):
+    failed = dict(SLACK_ANSWER, confidence=0.1)
+    report, urls = _slack_eval(tmp_path, monkeypatch, failed, ("new_invite", 0.5))
+    assert urls == ["http://localhost:11434/api/chat", f"{CLEF}/v1/systemone"]
+    assert report.escalated_t2() == (1, 1)
+    assert report.tier3_ids() == ["chat-001-slack-zoom"]
+    assert report.check_results() == {"inconclusive": 1}
+    out = runner.render_markdown(report)
+    assert "| escalated T2->T3 | 1/1 (chat-001-slack-zoom) |" in out
+    assert "| tier 2.5 results | inconclusive 1 |" in out
+    assert "| tier 2.5 dropped invites | 0 |" in out
+    assert "| tier 2.5 wrong starts | 0 |" in out
+
+
+def test_tier2_eval_with_check_off_counts_tier_3_as_before(tmp_path: Path, monkeypatch):
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", tmp_path)
+    urls = _chain(monkeypatch, dict(SLACK_ANSWER, confidence=0.1), ("not_invite", 0.99))
+    cfg = parse_config({"tier0": {"host": CLEF}})
+    report = runner.evaluate(
+        load_fixtures(tmp_path), tier=2, llm=cfg.llm, tier0=cfg.tier0, ram_sampler=lambda: None
+    )
+    assert urls == ["http://localhost:11434/api/chat"]
+    assert report.escalated_t2() == (1, 1)
+    out = runner.render_markdown(report)
+    assert "| escalated T2->T3 | 1/1 |" in out
+    assert "tier 2.5" not in out
+
+
+def test_tier2_eval_names_a_new_invite_tier_2_5_dropped(tmp_path: Path, monkeypatch):
+    failed = dict(SLACK_ANSWER, confidence=0.1)
+    report, _ = _slack_eval(tmp_path, monkeypatch, failed, ("not_invite", 0.95))
+    assert report.escalated_t2() == (0, 1)
+    assert report.dropped_invite_ids() == ["chat-001-slack-zoom"]
+    assert report.results[0].predicted_label == "not_invite"
+    out = runner.render_markdown(report)
+    assert "| tier 2.5 dropped invites | 1 (chat-001-slack-zoom) |" in out
+    assert "| escalated T2->T3 | 0/1 |" in out
+
+
+def test_tier2_eval_names_a_confirmed_start_that_misses_the_expected_start(
+    tmp_path: Path, monkeypatch
+):
+    failed = dict(SLACK_ANSWER, confidence=0.1)
+    report, _ = _slack_eval(tmp_path, monkeypatch, failed, ("new_invite", 0.95), ("yes", 0.95))
+    assert report.check_results() == {"confirmed": 1}
+    assert report.escalated_t2() == (0, 1)
+    assert report.wrong_start_ids() == ["chat-001-slack-zoom"]
+    assert "| tier 2.5 wrong starts | 1 (chat-001-slack-zoom) |" in runner.render_markdown(report)
+
+
+def test_tier2_eval_counts_no_wrong_start_when_the_confirmed_start_is_expected(
+    tmp_path: Path, monkeypatch
+):
+    failed = dict(RIGHT_START, confidence=0.1)
+    report, _ = _slack_eval(tmp_path, monkeypatch, failed, ("new_invite", 0.95), ("yes", 0.95))
+    assert report.check_results() == {"confirmed": 1}
+    assert report.wrong_start_ids() == []
+    assert report.results[0].predicted_label == "new_invite"
+    assert report.field_accuracy()["start"] == (1, 1)
+
+
+def test_tier2_eval_uses_the_configured_invite_threshold(tmp_path: Path, monkeypatch):
+    failed = dict(SLACK_ANSWER, confidence=0.1)
+    report, _ = _slack_eval(
+        tmp_path, monkeypatch, failed, ("not_invite", 0.6), invite_threshold=0.5
+    )
+    assert report.dropped_invite_ids() == ["chat-001-slack-zoom"]
+
+
+def test_tier2_eval_with_check_but_no_tier0_raises(subset_dir: Path):
+    llm = parse_config({}).llm
+    llm.check.enabled = True
+    with pytest.raises(runner.EvalConfigError, match=r"\[tier0\]"):
+        runner.evaluate(load_fixtures(subset_dir), tier=2, llm=llm)
+
+
+def test_cli_eval_tier2_passes_tier0_to_the_check(tmp_path: Path, monkeypatch, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        f'[tier0]\nhost = "{CLEF}"\nretries = 0\n\n[llm.check]\nenabled = true\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CUECAL_CONFIG", str(config))
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    shutil.copy(FIXTURES / "chat" / "slack_quick_sync_zoom.json", fixtures)
+    urls = _chain(monkeypatch, dict(SLACK_ANSWER, confidence=0.1), ("cancel", 0.95))
+    rc = cli.main(["eval", "--tier", "2", "--fixtures", str(fixtures), "--format", "markdown"])
+    assert rc == 0
+    assert f"{CLEF}/v1/systemone" in urls
+    out = capsys.readouterr().out
+    assert "| tier 2.5 results | log_only 1 |" in out
+    assert "| tier 2.5 dropped invites | 1 (chat-001-slack-zoom) |" in out
 
 
 def test_tier3_eval_without_paid_config_raises(subset_dir: Path):

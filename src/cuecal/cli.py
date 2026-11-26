@@ -1197,6 +1197,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
             model=args.model,
             llm=cfg.llm if cfg else None,
             secret_names=cfg.secrets if cfg else None,
+            tier0=cfg.tier0 if cfg else None,
         )
     except (runner.TierNotBuiltError, runner.EvalConfigError) as exc:
         print(f"eval: {exc}", file=sys.stderr)
